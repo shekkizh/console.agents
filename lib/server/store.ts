@@ -100,9 +100,14 @@ export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> 
   return { agents: [generalAgent, ...(agentRows as AgentRow[]).map(toAgentProfile)], tasks };
 }
 
-export async function createAgent(ownerId: string, input: { name: string; specialty: string; instructions: string }): Promise<AgentProfile> {
+export async function agentNameExists(ownerId: string, name: string): Promise<boolean> {
   const sql = database();
-  const id = crypto.randomUUID();
+  const rows = await sql`SELECT id FROM agents WHERE owner_id = ${ownerId} AND lower(name) = lower(${name}) LIMIT 1`;
+  return rows.length > 0;
+}
+
+export async function createAgent(ownerId: string, id: string, input: { name: string; specialty: string; instructions: string }): Promise<AgentProfile> {
+  const sql = database();
   const rows = await sql`
     INSERT INTO agents (id, owner_id, name, specialty, instructions)
     VALUES (${id}, ${ownerId}, ${input.name}, ${input.specialty}, ${input.instructions})

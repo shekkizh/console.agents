@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireOwner } from "@/lib/server/auth";
-import { createAgent } from "@/lib/server/store";
+import { createManagedAgentDefinition } from "@/lib/server/gemini";
+import { agentNameExists, createAgent } from "@/lib/server/store";
 
 const createAgentSchema = z.object({
   name: z.string().trim().min(2).max(60),
@@ -13,7 +14,12 @@ export async function POST(request: Request) {
   try {
     const ownerId = await requireOwner();
     const input = createAgentSchema.parse(await request.json());
-    return NextResponse.json(await createAgent(ownerId, input), { status: 201 });
+    if (await agentNameExists(ownerId, input.name)) {
+      return NextResponse.json({ error: "You already have an agent with that name" }, { status: 409 });
+    }
+    const id = `console-${crypto.randomUUID()}`;
+    await createManagedAgentDefinition(id, input);
+    return NextResponse.json(await createAgent(ownerId, id, input), { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to create agent";
     const duplicate = message.includes("agents_owner_id_name_key");
