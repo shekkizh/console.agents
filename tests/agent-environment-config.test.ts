@@ -21,7 +21,7 @@ test("a new managed environment mounts editable instructions, the platform skill
   );
 
   assert.equal(environment.type, "remote");
-  assert.deepEqual(environment.sources.map((source) => source.target), [
+  assert.deepEqual(environment.sources?.map((source) => source.target), [
     ".agents/skills/console-platform/SKILL.md",
     ".agents/AGENTS.md",
     "/workspace/repository",
@@ -32,13 +32,10 @@ test("a new managed environment mounts editable instructions, the platform skill
   });
 });
 
-test("a reused environment refreshes its skill and credentials without overwriting durable agent files", () => {
+test("a reused environment refreshes credentials without remounting or overwriting durable agent files", () => {
   const environment = buildManagedEnvironment(agent, "fresh-token", "https://console.shekkizh.com", "env_123");
 
   assert.equal(environment.environment_id, "env_123");
-  assert.deepEqual(environment.sources.map((source) => source.target), [
-    ".agents/skills/console-platform/SKILL.md",
-  ]);
+  assert.equal(environment.sources, undefined);
   assert.equal(environment.network.allowlist[0].transform?.Authorization, "Bearer fresh-token");
-  assert.match(environment.sources[0].content, /POST \/api\/agent-platform\/agents/);
 });

@@ -66,21 +66,24 @@ export function buildManagedEnvironment(
   repositoryUrl?: string,
 ) {
   const domain = new URL(baseUrl).hostname;
-  const sources: Array<Record<string, string>> = [{
-    type: "inline",
-    target: ".agents/skills/console-platform/SKILL.md",
-    content: consolePlatformSkill(baseUrl),
-  }];
+  const sources: Array<Record<string, string>> = [];
 
   if (!environmentId) {
-    sources.push({ type: "inline", target: ".agents/AGENTS.md", content: baselineAgentsFile(agent) });
+    sources.push(
+      {
+        type: "inline",
+        target: ".agents/skills/console-platform/SKILL.md",
+        content: consolePlatformSkill(baseUrl),
+      },
+      { type: "inline", target: ".agents/AGENTS.md", content: baselineAgentsFile(agent) },
+    );
     if (repositoryUrl) sources.push({ type: "repository", source: repositoryUrl, target: "/workspace/repository" });
   }
 
   return {
     type: "remote",
     ...(environmentId ? { environment_id: environmentId } : {}),
-    sources,
+    ...(sources.length ? { sources } : {}),
     network: {
       allowlist: [
         { domain, transform: { Authorization: `Bearer ${token}` } },
