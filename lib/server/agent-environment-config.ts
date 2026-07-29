@@ -5,6 +5,8 @@ interface ManagedAgentIdentity {
   instructions: string;
 }
 
+export const MANAGED_ENVIRONMENT_VERSION = 1;
+
 export function consolePlatformSkill(baseUrl: string): string {
   return `---
 name: console-platform

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { GENERAL_AGENT_ID } from "@/lib/general-agent";
+import { MANAGED_ENVIRONMENT_VERSION } from "@/lib/server/agent-environment-config";
 import { requireOwner } from "@/lib/server/auth";
 import { runManagedAgent } from "@/lib/server/gemini";
 import { appendUserMessage, completeRun, failRun, getTaskAgent, markRunStarted } from "@/lib/server/store";
@@ -17,7 +18,8 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
     if (!agent) throw new Error("This task's agent is no longer available");
     let updated;
     try {
-      const result = await runManagedAgent(content, task.interactionId, task.environmentId, task.repositoryUrl, agent, {
+      const environmentId = (task.environmentVersion ?? 0) >= MANAGED_ENVIRONMENT_VERSION ? task.environmentId : undefined;
+      const result = await runManagedAgent(content, task.interactionId, environmentId, task.repositoryUrl, agent, {
         allowDelegation: agent.id === GENERAL_AGENT_ID && !task.parentTaskId,
         ownerId,
       });

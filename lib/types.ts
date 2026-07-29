@@ -53,6 +53,7 @@ export interface AgentTask {
   artifacts: Artifact[];
   interactionId?: string;
   environmentId?: string;
+  environmentVersion?: number;
   repositoryUrl?: string;
   parentTaskId?: string;
 }

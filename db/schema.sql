@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   agent_id text NOT NULL,
   interaction_id text,
   environment_id text,
+  environment_version integer NOT NULL DEFAULT 0,
   repository_url text,
   parent_task_id uuid REFERENCES tasks(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -30,6 +31,7 @@ CREATE INDEX IF NOT EXISTS tasks_owner_updated_idx ON tasks(owner_id, updated_at
 CREATE INDEX IF NOT EXISTS tasks_owner_status_idx ON tasks(owner_id, status);
 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repository_url text;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS environment_version integer NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

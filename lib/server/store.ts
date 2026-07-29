@@ -2,6 +2,7 @@ import "server-only";
 
 import { neon } from "@neondatabase/serverless";
 import { GENERAL_AGENT_ID, generalAgent } from "@/lib/general-agent";
+import { MANAGED_ENVIRONMENT_VERSION } from "@/lib/server/agent-environment-config";
 import { requireDatabaseUrl } from "@/lib/server/config";
 import type { AgentProfile, AgentTask, Message, WorkspaceSnapshot } from "@/lib/types";
 
@@ -25,6 +26,7 @@ type TaskRow = {
   updated_at: string;
   interaction_id: string | null;
   environment_id: string | null;
+  environment_version: number;
   repository_url: string | null;
   parent_task_id: string | null;
   messages: Message[] | null;
@@ -91,6 +93,7 @@ export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> 
     updatedAt: row.updated_at,
     interactionId: row.interaction_id ?? undefined,
     environmentId: row.environment_id ?? undefined,
+    environmentVersion: row.environment_version,
     repositoryUrl: row.repository_url ?? undefined,
     parentTaskId: row.parent_task_id ?? undefined,
     messages: (row.messages ?? []).toSorted((a, b) => a.createdAt.localeCompare(b.createdAt)),
@@ -153,6 +156,7 @@ export async function getLatestAgentEnvironment(ownerId: string, agentId: string
   const rows = await sql`
     SELECT environment_id FROM tasks
     WHERE owner_id = ${ownerId} AND agent_id = ${agentId} AND environment_id IS NOT NULL
+      AND environment_version >= ${MANAGED_ENVIRONMENT_VERSION}
     ORDER BY updated_at DESC
     LIMIT 1
   `;
@@ -278,7 +282,7 @@ export async function appendUserMessage(ownerId: string, taskId: string, content
   return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
 }
 
-export async function completeRun(ownerId: string, taskId: string, result: { interactionId: string; output: string; steps: Message["steps"]; status: "completed" | "running" | "failed" }): Promise<AgentTask> {
+export async function completeRun(ownerId: string, taskId: string, result: { interactionId: string; environmentId?: string; output: string; steps: Message["steps"]; status: "completed" | "running" | "failed" }): Promise<AgentTask> {
   const sql = database();
   const now = new Date().toISOString();
   const rows = await sql`
@@ -293,7 +297,12 @@ export async function completeRun(ownerId: string, taskId: string, result: { int
   await sql.transaction([
     sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, steps, created_at)
         VALUES (${crypto.randomUUID()}, ${ownerId}, ${taskId}, 'agent', ${author}, ${result.output}, ${JSON.stringify(result.steps ?? [])}, ${now})`,
-    sql`UPDATE tasks SET status = ${result.status}, interaction_id = ${result.interactionId}, updated_at = ${now}
+    sql`UPDATE tasks SET
+          status = ${result.status},
+          interaction_id = ${result.interactionId},
+          environment_id = COALESCE(${result.environmentId ?? null}, environment_id),
+          environment_version = CASE WHEN ${result.environmentId ?? null} IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
+          updated_at = ${now}
         WHERE id = ${taskId} AND owner_id = ${ownerId}`,
   ]);
   return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
@@ -322,7 +331,12 @@ export async function failRun(ownerId: string, taskId: string, output: string): 
 export async function markRunStarted(ownerId: string, taskId: string, result: { interactionId: string; environmentId?: string }): Promise<AgentTask> {
   const sql = database();
   const now = new Date().toISOString();
-  const rows = await sql`UPDATE tasks SET status = 'running', interaction_id = ${result.interactionId}, environment_id = COALESCE(${result.environmentId ?? null}, environment_id), updated_at = ${now}
+  const rows = await sql`UPDATE tasks SET
+      status = 'running',
+      interaction_id = ${result.interactionId},
+      environment_id = COALESCE(${result.environmentId ?? null}, environment_id),
+      environment_version = CASE WHEN ${result.environmentId ?? null} IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
+      updated_at = ${now}
     WHERE id = ${taskId} AND owner_id = ${ownerId} RETURNING id`;
   if (!rows.length) throw new Error("Task not found");
   return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
