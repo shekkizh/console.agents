@@ -3,7 +3,7 @@ import { z } from "zod";
 import { GENERAL_AGENT_ID } from "@/lib/general-agent";
 import { requireOwner } from "@/lib/server/auth";
 import { runManagedAgent } from "@/lib/server/gemini";
-import { completeRun, createTask, failRun, getTaskAgent, markRunStarted } from "@/lib/server/store";
+import { completeRun, createTask, failRun, getLatestAgentEnvironment, getTaskAgent, markRunStarted } from "@/lib/server/store";
 
 const createTaskSchema = z.object({
   title: z.string().trim().min(2).max(120),
@@ -24,7 +24,11 @@ export async function POST(request: Request) {
     if (!agent) throw new Error("This task's agent is no longer available");
     let updated;
     try {
-      const result = await runManagedAgent(task.summary, undefined, undefined, task.repositoryUrl, agent, { allowDelegation: agent.id === GENERAL_AGENT_ID });
+      const environmentId = await getLatestAgentEnvironment(ownerId, task.agentId);
+      const result = await runManagedAgent(task.summary, undefined, environmentId, task.repositoryUrl, agent, {
+        allowDelegation: agent.id === GENERAL_AGENT_ID,
+        ownerId,
+      });
       updated = result.status === "completed" || result.status === "failed"
         ? await completeRun(ownerId, task.id, { ...result, status: result.status })
         : await markRunStarted(ownerId, task.id, result);

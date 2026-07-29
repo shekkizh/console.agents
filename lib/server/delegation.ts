@@ -84,12 +84,12 @@ function functionResult(state: DelegationState): FunctionResultInput {
 
 export async function advanceDelegations(ownerId: string, parentTask: AgentTask, result: ManagedRunResult): Promise<AgentTask> {
   const acceptedCalls = result.pendingCalls.slice(0, 3);
-  const rejectedCalls: DelegationState[] = result.pendingCalls.slice(3).map((call) => ({ call, error: "Delegation limit reached: at most three temporary workers are allowed." }));
+  const rejectedCalls: DelegationState[] = result.pendingCalls.slice(3).map((call) => ({ call, error: "Delegation limit reached: at most three temporary workers are allowed per request." }));
   const states = [...await Promise.all(acceptedCalls.map((call) => advanceChild(ownerId, parentTask, call))), ...rejectedCalls];
   const waiting = states.some((state) => state.task && (state.task.status === "queued" || state.task.status === "running"));
   if (waiting) return markRunStarted(ownerId, parentTask.id, result);
 
-  const continuation = await continueManagedAgentWithFunctionResults(result.interactionId, result.environmentId ?? parentTask.environmentId, states.map(functionResult));
+  const continuation = await continueManagedAgentWithFunctionResults(ownerId, result.interactionId, result.environmentId ?? parentTask.environmentId, states.map(functionResult));
   return continuation.status === "completed" || continuation.status === "failed"
     ? completeRun(ownerId, parentTask.id, { ...continuation, status: continuation.status })
     : markRunStarted(ownerId, parentTask.id, continuation);

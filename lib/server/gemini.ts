@@ -1,7 +1,9 @@
 import "server-only";
 
-import { GENERAL_AGENT_ID } from "@/lib/general-agent";
+import { GENERAL_AGENT_ID, generalAgent } from "@/lib/general-agent";
+import { generalPlatformTools, toFunctionResultStep } from "@/lib/server/agent-tools";
 import { config, requireGeminiApiKey } from "@/lib/server/config";
+import { managedEnvironment } from "@/lib/server/console-platform-skill";
 import { interactionOutputText, stepText, type GeminiInteractionPayload } from "@/lib/server/gemini-response";
 import type { AgentProfile, RunStep } from "@/lib/types";
 
@@ -25,20 +27,6 @@ export interface FunctionResultInput {
   name: string;
   result: Record<string, unknown>;
 }
-
-const delegateTaskTool = {
-  type: "function",
-  name: "delegate_task",
-  description: "Delegate one narrow, independent subtask to a temporary worker. Use only when delegation materially improves speed or quality. At most three calls are allowed for a user request.",
-  parameters: {
-    type: "object",
-    properties: {
-      title: { type: "string", description: "A short, specific label for the delegated work." },
-      brief: { type: "string", description: "A self-contained brief with the outcome, context, constraints, and expected return format." },
-    },
-    required: ["title", "brief"],
-  },
-};
 
 function normalizeSteps(payload: GeminiInteractionPayload): RunStep[] {
   const rawSteps = payload.steps ?? payload.outputs ?? [];
@@ -73,16 +61,20 @@ function pendingFunctionCalls(payload: GeminiInteractionPayload): DelegationCall
 }
 
 function normalizeResult(payload: GeminiInteractionPayload, fallbackInteractionId?: string): ManagedRunResult {
-  const status = payload.status === "completed" || payload.status === "incomplete"
+  const status = payload.status === "completed"
     ? "completed"
-    : payload.status === "failed" || payload.status === "cancelled"
+    : payload.status === "failed" || payload.status === "cancelled" || payload.status === "incomplete"
       ? "failed"
       : payload.status === "requires_action"
         ? "requires_action"
         : "running";
   return {
     interactionId: payload.id ?? fallbackInteractionId ?? crypto.randomUUID(),
-    output: interactionOutputText(payload) || (status === "completed" ? "The managed run finished without a text response." : ""),
+    output: interactionOutputText(payload) || (status === "completed"
+      ? "The managed run finished without a text response."
+      : payload.status === "incomplete"
+        ? "The managed run ended before producing a response."
+        : ""),
     status,
     steps: normalizeSteps(payload),
     environmentId: payload.environment_id,
@@ -110,46 +102,47 @@ async function postInteraction(body: Record<string, unknown>): Promise<ManagedRu
 export async function runManagedAgent(input: string, previousInteractionId?: string, environmentId?: string, repositoryUrl?: string, agent?: AgentProfile, options?: {
   allowDelegation?: boolean;
   maxTotalTokens?: number;
+  ownerId?: string;
 }): Promise<ManagedRunResult> {
   const allowDelegation = Boolean(options?.allowDelegation && agent?.id === GENERAL_AGENT_ID);
   const isSavedManagedAgent = Boolean(agent && !agent.builtIn && agent.id.startsWith("console-"));
   const targetAgentId = isSavedManagedAgent ? agent!.id : config.geminiAgentId;
   const acceptsAgentConfig = targetAgentId.startsWith("antigravity-");
+  const environment = options?.ownerId && agent
+    ? await managedEnvironment(options.ownerId, agent, environmentId, repositoryUrl)
+    : environmentId ?? (repositoryUrl ? {
+        type: "remote",
+        sources: [{ type: "repository", source: repositoryUrl, target: "/workspace/repository" }],
+      } : "remote");
   return postInteraction({
     agent: targetAgentId,
     input,
-    system_instruction: !isSavedManagedAgent && agent ? `You are ${agent.name}, a ${agent.specialty}. ${agent.instructions}` : undefined,
-    environment: environmentId ?? (repositoryUrl ? {
-        type: "remote",
-        sources: [{
-          type: "repository",
-          source: repositoryUrl,
-          target: "/workspace/repository",
-        }],
-      } : "remote"),
+    system_instruction: agent ? `You are ${agent.name}, a ${agent.specialty}. ${agent.instructions}` : undefined,
+    environment,
     background: true,
     store: true,
     ...(acceptsAgentConfig ? { agent_config: { type: "antigravity", max_total_tokens: options?.maxTotalTokens ?? 50_000 } } : {}),
-    ...(allowDelegation ? { tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, delegateTaskTool] } : {}),
+    ...(allowDelegation ? { tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, ...generalPlatformTools] } : {}),
     ...(previousInteractionId ? { previous_interaction_id: previousInteractionId } : {}),
   });
 }
 
-export async function continueManagedAgentWithFunctionResults(previousInteractionId: string, environmentId: string | undefined, results: FunctionResultInput[]): Promise<ManagedRunResult> {
+export async function continueManagedAgentWithFunctionResults(ownerId: string, previousInteractionId: string, environmentId: string | undefined, results: FunctionResultInput[]): Promise<ManagedRunResult> {
   const acceptsAgentConfig = config.geminiAgentId.startsWith("antigravity-");
   return postInteraction({
     agent: config.geminiAgentId,
     previous_interaction_id: previousInteractionId,
-    environment: environmentId ?? "remote",
-    input: results.map((item) => ({ type: "function_result", name: item.name, call_id: item.callId, result: item.result })),
+    environment: await managedEnvironment(ownerId, generalAgent, environmentId),
+    input: results.map(toFunctionResultStep),
+    system_instruction: `You are ${generalAgent.name}, a ${generalAgent.specialty}. ${generalAgent.instructions}`,
     background: true,
     store: true,
-    tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }],
+    tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, ...generalPlatformTools],
     ...(acceptsAgentConfig ? { agent_config: { type: "antigravity", max_total_tokens: 50_000 } } : {}),
   });
 }
 
-export async function createManagedAgentDefinition(id: string, agent: Pick<AgentProfile, "name" | "specialty" | "instructions">): Promise<void> {
+export async function createManagedAgentDefinition(ownerId: string, id: string, agent: Pick<AgentProfile, "name" | "specialty" | "instructions">, options?: { allowExisting?: boolean }): Promise<void> {
   const geminiApiKey = requireGeminiApiKey();
   const response = await fetch("https://generativelanguage.googleapis.com/v1beta/agents", {
     method: "POST",
@@ -163,12 +156,14 @@ export async function createManagedAgentDefinition(id: string, agent: Pick<Agent
       base_agent: "antigravity-preview-05-2026",
       agent_config: { type: "antigravity" },
       system_instruction: `You are ${agent.name}, a ${agent.specialty}. ${agent.instructions}`,
-      base_environment: "remote",
+      base_environment: await managedEnvironment(ownerId, { id, ...agent }),
     }),
     signal: AbortSignal.timeout(60_000),
   });
   const payload = (await response.json()) as GeminiInteractionPayload;
-  if (!response.ok) throw new Error(payload.error?.message ?? `Gemini agent creation failed (${response.status})`);
+  if (!response.ok && !(options?.allowExisting && response.status === 409)) {
+    throw new Error(payload.error?.message ?? `Gemini agent creation failed (${response.status})`);
+  }
 }
 
 export async function getManagedAgentRun(interactionId: string): Promise<ManagedRunResult> {

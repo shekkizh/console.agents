@@ -19,6 +19,7 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
     try {
       const result = await runManagedAgent(content, task.interactionId, task.environmentId, task.repositoryUrl, agent, {
         allowDelegation: agent.id === GENERAL_AGENT_ID && !task.parentTaskId,
+        ownerId,
       });
       updated = result.status === "completed" || result.status === "failed"
         ? await completeRun(ownerId, taskId, { ...result, status: result.status })

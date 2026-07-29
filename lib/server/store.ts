@@ -100,10 +100,27 @@ export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> 
   return { agents: [generalAgent, ...(agentRows as AgentRow[]).map(toAgentProfile)], tasks };
 }
 
-export async function agentNameExists(ownerId: string, name: string): Promise<boolean> {
+export async function listAgents(ownerId: string): Promise<AgentProfile[]> {
   const sql = database();
-  const rows = await sql`SELECT id FROM agents WHERE owner_id = ${ownerId} AND lower(name) = lower(${name}) LIMIT 1`;
-  return rows.length > 0;
+  const rows = await sql`SELECT id, name, specialty, instructions FROM agents WHERE owner_id = ${ownerId} ORDER BY created_at ASC`;
+  return [generalAgent, ...(rows as AgentRow[]).map(toAgentProfile)];
+}
+
+export async function findAgentByName(ownerId: string, name: string): Promise<AgentProfile | undefined> {
+  const sql = database();
+  const rows = await sql`SELECT id, name, specialty, instructions FROM agents WHERE owner_id = ${ownerId} AND lower(name) = lower(${name}) LIMIT 1`;
+  return rows[0] ? toAgentProfile(rows[0] as AgentRow) : undefined;
+}
+
+export async function getAgent(ownerId: string, agentId: string): Promise<AgentProfile | undefined> {
+  if (agentId === GENERAL_AGENT_ID) return generalAgent;
+  const sql = database();
+  const rows = await sql`SELECT id, name, specialty, instructions FROM agents WHERE owner_id = ${ownerId} AND id = ${agentId} LIMIT 1`;
+  return rows[0] ? toAgentProfile(rows[0] as AgentRow) : undefined;
+}
+
+export async function agentNameExists(ownerId: string, name: string): Promise<boolean> {
+  return Boolean(await findAgentByName(ownerId, name));
 }
 
 export async function createAgent(ownerId: string, id: string, input: { name: string; specialty: string; instructions: string }): Promise<AgentProfile> {
@@ -114,6 +131,32 @@ export async function createAgent(ownerId: string, id: string, input: { name: st
     RETURNING id, name, specialty, instructions
   `;
   return toAgentProfile(rows[0] as AgentRow);
+}
+
+export async function updateAgent(ownerId: string, agentId: string, input: { name?: string; specialty?: string; instructions?: string }): Promise<AgentProfile> {
+  if (agentId === GENERAL_AGENT_ID) throw new Error("General's profile is built in; update its durable .agents/AGENTS.md file instead.");
+  const sql = database();
+  const rows = await sql`
+    UPDATE agents SET
+      name = COALESCE(${input.name ?? null}, name),
+      specialty = COALESCE(${input.specialty ?? null}, specialty),
+      instructions = COALESCE(${input.instructions ?? null}, instructions)
+    WHERE owner_id = ${ownerId} AND id = ${agentId}
+    RETURNING id, name, specialty, instructions
+  `;
+  if (!rows.length) throw new Error("Agent not found");
+  return toAgentProfile(rows[0] as AgentRow);
+}
+
+export async function getLatestAgentEnvironment(ownerId: string, agentId: string): Promise<string | undefined> {
+  const sql = database();
+  const rows = await sql`
+    SELECT environment_id FROM tasks
+    WHERE owner_id = ${ownerId} AND agent_id = ${agentId} AND environment_id IS NOT NULL
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `;
+  return rows[0]?.environment_id ? String(rows[0].environment_id) : undefined;
 }
 
 export async function getTaskAgent(ownerId: string, taskId: string): Promise<AgentProfile | undefined> {
