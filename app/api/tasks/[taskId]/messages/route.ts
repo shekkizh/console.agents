@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireOwner } from "@/lib/server/auth";
 import { runManagedAgent } from "@/lib/server/gemini";
-import { appendUserMessage, completeRun, markRunStarted } from "@/lib/server/store";
+import { appendUserMessage, completeRun, getTaskAgent, markRunStarted } from "@/lib/server/store";
 
 const messageSchema = z.object({ content: z.string().trim().min(1).max(20_000) });
 
@@ -12,7 +12,9 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
     const { taskId } = await context.params;
     const { content } = messageSchema.parse(await request.json());
     const task = await appendUserMessage(ownerId, taskId, content);
-    const result = await runManagedAgent(content, task.interactionId, task.environmentId, task.repositoryUrl);
+    const agent = await getTaskAgent(ownerId, taskId);
+    if (!agent) throw new Error("This task's agent is no longer available");
+    const result = await runManagedAgent(content, task.interactionId, task.environmentId, task.repositoryUrl, agent);
 
     const updated = result.status === "running"
       ? await markRunStarted(ownerId, taskId, result)

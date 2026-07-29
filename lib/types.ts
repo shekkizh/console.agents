@@ -9,6 +9,7 @@ export interface AgentProfile {
   initials: string;
   specialty: string;
   description: string;
+  instructions: string;
   status: AgentStatus;
   color: string;
 }

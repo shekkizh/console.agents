@@ -1,9 +1,17 @@
 import "server-only";
 
 import { neon } from "@neondatabase/serverless";
-import { agentCatalog } from "@/lib/agent-catalog";
 import { requireDatabaseUrl } from "@/lib/server/config";
-import type { AgentTask, Message, WorkspaceSnapshot } from "@/lib/types";
+import type { AgentProfile, AgentTask, Message, WorkspaceSnapshot } from "@/lib/types";
+
+const agentColors = ["#c8f169", "#8bb8ff", "#f0ae88", "#d7a8ff", "#77d7c2", "#ffd166"];
+
+type AgentRow = {
+  id: string;
+  name: string;
+  specialty: string;
+  instructions: string;
+};
 
 type TaskRow = {
   id: string;
@@ -25,9 +33,34 @@ function database() {
   return neon(requireDatabaseUrl());
 }
 
+function agentInitials(name: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0][0]}${words.at(-1)?.[0]}` : words[0]?.slice(0, 2) ?? "AI").toUpperCase();
+}
+
+function agentColor(id: string) {
+  const hash = Array.from(id).reduce((total, character) => total + character.charCodeAt(0), 0);
+  return agentColors[hash % agentColors.length];
+}
+
+function toAgentProfile(row: AgentRow): AgentProfile {
+  return {
+    id: row.id,
+    name: row.name,
+    initials: agentInitials(row.name),
+    specialty: row.specialty,
+    description: row.instructions || row.specialty,
+    instructions: row.instructions,
+    status: "ready",
+    color: agentColor(row.id),
+  };
+}
+
 export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> {
   const sql = database();
-  const rows = (await sql`
+  const [agentRows, taskRows] = await Promise.all([
+    sql`SELECT id, name, specialty, instructions FROM agents WHERE owner_id = ${ownerId} ORDER BY created_at ASC`,
+    sql`
     SELECT t.*,
       COALESCE(json_agg(DISTINCT jsonb_build_object(
         'id', m.id, 'role', m.role, 'author', m.author, 'content', m.content,
@@ -42,9 +75,10 @@ export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> 
     WHERE t.owner_id = ${ownerId}
     GROUP BY t.id
     ORDER BY t.updated_at DESC
-  `) as TaskRow[];
+  `,
+  ]);
 
-  const tasks = rows.map((row) => ({
+  const tasks = (taskRows as TaskRow[]).map((row) => ({
     id: row.id,
     title: row.title,
     summary: row.summary,
@@ -60,12 +94,36 @@ export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> 
     artifacts: row.artifacts ?? [],
   }));
 
-  return { agents: agentCatalog, tasks };
+  return { agents: (agentRows as AgentRow[]).map(toAgentProfile), tasks };
+}
+
+export async function createAgent(ownerId: string, input: { name: string; specialty: string; instructions: string }): Promise<AgentProfile> {
+  const sql = database();
+  const id = crypto.randomUUID();
+  const rows = await sql`
+    INSERT INTO agents (id, owner_id, name, specialty, instructions)
+    VALUES (${id}, ${ownerId}, ${input.name}, ${input.specialty}, ${input.instructions})
+    RETURNING id, name, specialty, instructions
+  `;
+  return toAgentProfile(rows[0] as AgentRow);
+}
+
+export async function getTaskAgent(ownerId: string, taskId: string): Promise<AgentProfile | undefined> {
+  const sql = database();
+  const rows = await sql`
+    SELECT a.id, a.name, a.specialty, a.instructions
+    FROM tasks t
+    JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
+    WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
+    LIMIT 1
+  `;
+  return rows[0] ? toAgentProfile(rows[0] as AgentRow) : undefined;
 }
 
 export async function createTask(ownerId: string, input: { title: string; summary: string; agentId: string; repositoryUrl?: string }): Promise<AgentTask> {
-  if (!agentCatalog.some((agent) => agent.id === input.agentId)) throw new Error("Unknown agent");
   const sql = database();
+  const agentRows = await sql`SELECT id FROM agents WHERE id = ${input.agentId} AND owner_id = ${ownerId} LIMIT 1`;
+  if (!agentRows.length) throw new Error("Choose one of your agents");
   const now = new Date().toISOString();
   const task: AgentTask = {
     id: crypto.randomUUID(), title: input.title, summary: input.summary, status: "queued", priority: "normal",
@@ -99,9 +157,15 @@ export async function appendUserMessage(ownerId: string, taskId: string, content
 export async function completeRun(ownerId: string, taskId: string, result: { interactionId: string; output: string; steps: Message["steps"]; status: "completed" | "running" | "failed" }): Promise<AgentTask> {
   const sql = database();
   const now = new Date().toISOString();
-  const rows = await sql`SELECT agent_id FROM tasks WHERE id = ${taskId} AND owner_id = ${ownerId} LIMIT 1`;
+  const rows = await sql`
+    SELECT t.agent_id, a.name AS agent_name
+    FROM tasks t
+    LEFT JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
+    WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
+    LIMIT 1
+  `;
   if (!rows.length) throw new Error("Task not found");
-  const author = agentCatalog.find((agent) => agent.id === rows[0].agent_id)?.name ?? "Agent";
+  const author = String(rows[0].agent_name ?? "Agent");
   await sql.transaction([
     sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, steps, created_at)
         VALUES (${crypto.randomUUID()}, ${ownerId}, ${taskId}, 'agent', ${author}, ${result.output}, ${JSON.stringify(result.steps ?? [])}, ${now})`,

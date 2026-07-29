@@ -1,7 +1,7 @@
 import "server-only";
 
 import { config, requireGeminiApiKey } from "@/lib/server/config";
-import type { RunStep } from "@/lib/types";
+import type { AgentProfile, RunStep } from "@/lib/types";
 
 interface GeminiInteraction {
   id?: string;
@@ -45,8 +45,11 @@ function normalizeSteps(payload: GeminiInteraction): RunStep[] {
   });
 }
 
-export async function runManagedAgent(input: string, previousInteractionId?: string, environmentId?: string, repositoryUrl?: string): Promise<ManagedRunResult> {
+export async function runManagedAgent(input: string, previousInteractionId?: string, environmentId?: string, repositoryUrl?: string, agent?: AgentProfile): Promise<ManagedRunResult> {
   const geminiApiKey = requireGeminiApiKey();
+  const agentInput = agent
+    ? `You are ${agent.name}, a ${agent.specialty}. Follow these standing instructions:\n${agent.instructions}\n\nUser request:\n${input}`
+    : input;
 
   const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
     method: "POST",
@@ -57,7 +60,7 @@ export async function runManagedAgent(input: string, previousInteractionId?: str
     },
     body: JSON.stringify({
       agent: config.geminiAgentId,
-      input,
+      input: agentInput,
       environment: environmentId ?? (repositoryUrl ? {
         type: "remote",
         sources: [{

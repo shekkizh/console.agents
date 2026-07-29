@@ -8,7 +8,7 @@ export function NewTaskDialog({ agents, onClose, onCreate }: { agents: AgentProf
   const [agentId, setAgentId] = useState(agents[0]?.id ?? "");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [saving, setSaving] = useState(false);
-  async function submit(event: React.FormEvent) { event.preventDefault(); if (!title.trim() || !summary.trim()) return; setSaving(true); try { await onCreate({ title, summary, agentId, repositoryUrl: repositoryUrl.trim() || undefined }); onClose(); } finally { setSaving(false); } }
+  async function submit(event: React.FormEvent) { event.preventDefault(); if (!title.trim() || !summary.trim() || !agentId) return; setSaving(true); try { await onCreate({ title, summary, agentId, repositoryUrl: repositoryUrl.trim() || undefined }); onClose(); } finally { setSaving(false); } }
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="new-task-dialog" onSubmit={submit}>
     <header><div><span>New task</span><h2>What should we move forward?</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></header>
     <label><span>Task name</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Prepare the launch analysis" maxLength={120} /></label>
