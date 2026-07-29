@@ -1,0 +1,10 @@
+node_modules
+.next
+.vercel
+.env
+.env.local
+*.tsbuildinfo
+npm-debug.log*
+
+.env
+docs
