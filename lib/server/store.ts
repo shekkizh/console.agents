@@ -269,7 +269,11 @@ export async function appendUserMessage(ownerId: string, taskId: string, content
   await sql.transaction([
     sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
         VALUES (${message.id}, ${ownerId}, ${taskId}, 'user', 'You', ${content}, ${now})`,
-    sql`UPDATE tasks SET status = 'running', updated_at = ${now} WHERE id = ${taskId} AND owner_id = ${ownerId}`,
+    sql`UPDATE tasks SET
+          interaction_id = CASE WHEN status = 'failed' THEN NULL ELSE interaction_id END,
+          status = 'running',
+          updated_at = ${now}
+        WHERE id = ${taskId} AND owner_id = ${ownerId}`,
   ]);
   return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
 }
