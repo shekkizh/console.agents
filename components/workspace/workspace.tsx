@@ -8,11 +8,11 @@ import { NewTaskDialog } from "@/components/workspace/new-task-dialog";
 import { Sidebar } from "@/components/workspace/sidebar";
 import { TaskList, type TaskFilter } from "@/components/workspace/task-list";
 import { TaskThread } from "@/components/workspace/task-thread";
-import type { AgentProfile, AgentTask, WorkspaceSnapshot } from "@/lib/types";
+import type { AgentProfile, WorkspaceSnapshot } from "@/lib/types";
 
 export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnapshot }) {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
-  const [selectedId, setSelectedId] = useState(initialSnapshot.tasks[0]?.id ?? "");
+  const [selectedId, setSelectedId] = useState(initialSnapshot.tasks.find((task) => !task.parentTaskId)?.id ?? "");
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [contextOpen, setContextOpen] = useState(true);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
@@ -21,18 +21,27 @@ export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnaps
   const [mobileThread, setMobileThread] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
-  const selectedTask = useMemo(() => snapshot.tasks.find((task) => task.id === selectedId) ?? snapshot.tasks[0], [snapshot.tasks, selectedId]);
+  const rootTasks = useMemo(() => snapshot.tasks.filter((task) => !task.parentTaskId), [snapshot.tasks]);
+  const selectedTask = useMemo(() => rootTasks.find((task) => task.id === selectedId) ?? rootTasks[0], [rootTasks, selectedId]);
   const selectedAgent = snapshot.agents.find((agent) => agent.id === selectedTask?.agentId);
+  const childTasks = useMemo(() => snapshot.tasks.filter((task) => task.parentTaskId === selectedTask?.id), [snapshot.tasks, selectedTask?.id]);
 
   useEffect(() => {
     if (!selectedTask || selectedTask.status !== "running" || !selectedTask.interactionId) return;
-    const timer = window.setInterval(async () => {
-      const response = await fetch(`/api/tasks/${selectedTask.id}/run`);
-      if (!response.ok) return;
-      const updated = await response.json() as AgentTask;
-      setSnapshot((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === updated.id ? updated : task) }));
-    }, 5_000);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let timer: number;
+    async function poll() {
+      try {
+        const response = await fetch(`/api/tasks/${selectedTask.id}/run`);
+        if (response.ok && active) setSnapshot(await response.json() as WorkspaceSnapshot);
+      } catch {
+        // A later poll can recover from transient navigation or network failures.
+      } finally {
+        if (active) timer = window.setTimeout(poll, 5_000);
+      }
+    }
+    timer = window.setTimeout(poll, 5_000);
+    return () => { active = false; window.clearTimeout(timer); };
   }, [selectedTask]);
 
   function selectTask(id: string) { setSelectedId(id); setMobileThread(true); setContextOpen(false); }
@@ -74,10 +83,10 @@ export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnaps
   }
 
   return <div className={`workspace-shell ${mobileThread ? "show-mobile-thread" : ""} ${contextOpen ? "context-is-open" : ""}`}>
-    <Sidebar agents={snapshot.agents} tasks={snapshot.tasks} filter={filter} onFilter={setFilter} onNewTask={requestNewTask} onAddAgent={() => { setOpenTaskAfterAgent(false); setNewAgentOpen(true); }} />
+    <Sidebar agents={snapshot.agents} tasks={rootTasks} filter={filter} onFilter={setFilter} onNewTask={requestNewTask} onAddAgent={() => { setOpenTaskAfterAgent(false); setNewAgentOpen(true); }} />
     <div className="app-surface">
-      <TaskList tasks={snapshot.tasks} agents={snapshot.agents} selectedId={selectedTask?.id ?? ""} filter={filter} onFilter={setFilter} onSelect={selectTask} onNewTask={requestNewTask} />
-      {selectedTask ? <TaskThread task={selectedTask} agent={selectedAgent} sending={sending} onSend={sendMessage} onBack={() => setMobileThread(false)} onToggleContext={() => setContextOpen((value) => !value)} /> : null}
+      <TaskList tasks={rootTasks} agents={snapshot.agents} selectedId={selectedTask?.id ?? ""} filter={filter} onFilter={setFilter} onSelect={selectTask} onNewTask={requestNewTask} />
+      {selectedTask ? <TaskThread task={selectedTask} childTasks={childTasks} agent={selectedAgent} sending={sending} onSend={sendMessage} onBack={() => setMobileThread(false)} onToggleContext={() => setContextOpen((value) => !value)} /> : null}
       {selectedTask && contextOpen ? <ContextPanel task={selectedTask} agent={selectedAgent} onClose={() => setContextOpen(false)} /> : null}
       {!selectedTask ? <EmptyWorkspace hasAgents={snapshot.agents.length > 0} onAction={snapshot.agents.length ? requestNewTask : () => { setOpenTaskAfterAgent(false); setNewAgentOpen(true); }} /> : null}
     </div>

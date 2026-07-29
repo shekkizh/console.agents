@@ -35,7 +35,8 @@ button { color: inherit; }
 .nav-item svg { color: #8fa09b; }
 .nav-item.active svg { color: var(--signal); }
 .nav-count { margin-left: auto; font-size: 11px; color: #83918d; }
-.sidebar-section { margin-top: 26px; min-height: 0; }
+.sidebar-section { margin-top: 20px; min-height: 0; }
+.sidebar-section-built-in { margin-top: 24px; }
 .section-label { padding: 0 8px 9px; display: flex; align-items: center; justify-content: space-between; color: #71817c; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .09em; }
 .section-label button { background: transparent; border: 0; color: #82918d; display: grid; place-items: center; cursor: pointer; }
 .agent-mini-list { display: grid; gap: 2px; }
@@ -134,6 +135,13 @@ button { color: inherit; }
 .run-step strong { color: #45504d; font-size: 10px; font-weight: 520; }
 .run-step small { color: #8a928f; font-size: 9px; line-height: 1.4; }
 .working-row { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; margin: -6px 0 30px; }
+.delegated-work { margin: -12px 0 28px; border: 1px solid var(--line); border-radius: 11px; background: #f4f5f1; overflow: hidden; }
+.delegated-work > header { min-height: 37px; padding: 0 11px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-soft); }
+.delegated-work > header span { display: flex; align-items: center; gap: 7px; color: #56615d; font-size: 10px; font-weight: 650; }
+.delegated-work > header small { color: var(--faint); font-size: 8px; }
+.delegated-task { min-height: 40px; padding: 7px 11px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.delegated-task + .delegated-task { border-top: 1px solid var(--line-soft); }
+.delegated-task strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #3f4b47; font-size: 10px; font-weight: 550; }
 .working-pulse { display: flex; gap: 3px; }
 .working-pulse i { width: 4px; height: 4px; background: var(--blue); border-radius: 50%; animation: bounce 1.2s infinite ease-in-out; }
 .working-pulse i:nth-child(2) { animation-delay: .15s; }.working-pulse i:nth-child(3) { animation-delay: .3s; }

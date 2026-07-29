@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowUp, Check, ChevronDown, Code2, FileText, MoreHorizontal, PanelRight, Search, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowUp, Bot, Check, ChevronDown, Code2, FileText, MoreHorizontal, PanelRight, Search, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Status } from "@/components/workspace/status";
 import type { AgentProfile, AgentTask, RunStep } from "@/lib/types";
@@ -11,8 +11,9 @@ function messageTime(value: string) {
   return new Date(value).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-export function TaskThread({ task, agent, sending, onSend, onBack, onToggleContext }: {
+export function TaskThread({ task, childTasks, agent, sending, onSend, onBack, onToggleContext }: {
   task: AgentTask;
+  childTasks: AgentTask[];
   agent?: AgentProfile;
   sending: boolean;
   onSend: (content: string) => Promise<void>;
@@ -40,6 +41,10 @@ export function TaskThread({ task, agent, sending, onSend, onBack, onToggleConte
       </header>
       <div className="message-scroll">
         <div className="conversation-date"><span>Task started {new Date(task.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })}</span></div>
+        {childTasks.length ? <section className="delegated-work" aria-label="Delegated work">
+          <header><span><Bot size={14} />Delegated work</span><small>{childTasks.length} temporary worker{childTasks.length === 1 ? "" : "s"}</small></header>
+          <div>{childTasks.map((child) => <div className="delegated-task" key={child.id}><span className="avatar avatar-tiny" style={{ background: agent?.color }}>{agent?.initials ?? "GE"}</span><strong>{child.title}</strong><Status status={child.status} compact /></div>)}</div>
+        </section> : null}
         {task.messages.map((message) => message.role === "user" ? (
           <article className="message message-user" key={message.id}>
             <div className="message-meta"><strong>You</strong><time>{messageTime(message.createdAt)}</time></div>

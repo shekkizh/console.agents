@@ -26,6 +26,8 @@ Startup and API requests fail explicitly when Clerk or Neon configuration is abs
 
 Long agent work starts with `background: true`; the web client polls through short-lived Vercel route handlers. Follow-up turns retain both the previous interaction ID and remote environment ID. A public GitHub repository supplied on task creation is mounted at `/workspace/repository` and remains available when the environment is reused.
 
+Every workspace includes a built-in General agent. It handles ordinary work directly and can use Gemini custom function calling to delegate up to three independent subtasks to temporary workers. Delegated tasks run as background interactions, cannot delegate further, remain linked through `parent_task_id`, and are folded back into General's final response without appearing as permanent user-created agents.
+
 ## Project guide
 
 - `PRODUCT_PLAN.md` — product boundary, UX concept, and success criteria.

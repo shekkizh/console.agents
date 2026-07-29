@@ -1,6 +1,7 @@
 import "server-only";
 
 import { neon } from "@neondatabase/serverless";
+import { GENERAL_AGENT_ID, generalAgent } from "@/lib/general-agent";
 import { requireDatabaseUrl } from "@/lib/server/config";
 import type { AgentProfile, AgentTask, Message, WorkspaceSnapshot } from "@/lib/types";
 
@@ -25,6 +26,7 @@ type TaskRow = {
   interaction_id: string | null;
   environment_id: string | null;
   repository_url: string | null;
+  parent_task_id: string | null;
   messages: Message[] | null;
   artifacts: AgentTask["artifacts"] | null;
 };
@@ -90,11 +92,12 @@ export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> 
     interactionId: row.interaction_id ?? undefined,
     environmentId: row.environment_id ?? undefined,
     repositoryUrl: row.repository_url ?? undefined,
+    parentTaskId: row.parent_task_id ?? undefined,
     messages: (row.messages ?? []).toSorted((a, b) => a.createdAt.localeCompare(b.createdAt)),
     artifacts: row.artifacts ?? [],
   }));
 
-  return { agents: (agentRows as AgentRow[]).map(toAgentProfile), tasks };
+  return { agents: [generalAgent, ...(agentRows as AgentRow[]).map(toAgentProfile)], tasks };
 }
 
 export async function createAgent(ownerId: string, input: { name: string; specialty: string; instructions: string }): Promise<AgentProfile> {
@@ -111,19 +114,22 @@ export async function createAgent(ownerId: string, input: { name: string; specia
 export async function getTaskAgent(ownerId: string, taskId: string): Promise<AgentProfile | undefined> {
   const sql = database();
   const rows = await sql`
-    SELECT a.id, a.name, a.specialty, a.instructions
+    SELECT t.agent_id, a.id, a.name, a.specialty, a.instructions
     FROM tasks t
-    JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
+    LEFT JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
     WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
     LIMIT 1
   `;
+  if (rows[0]?.agent_id === GENERAL_AGENT_ID) return generalAgent;
   return rows[0] ? toAgentProfile(rows[0] as AgentRow) : undefined;
 }
 
 export async function createTask(ownerId: string, input: { title: string; summary: string; agentId: string; repositoryUrl?: string }): Promise<AgentTask> {
   const sql = database();
-  const agentRows = await sql`SELECT id FROM agents WHERE id = ${input.agentId} AND owner_id = ${ownerId} LIMIT 1`;
-  if (!agentRows.length) throw new Error("Choose one of your agents");
+  if (input.agentId !== GENERAL_AGENT_ID) {
+    const agentRows = await sql`SELECT id FROM agents WHERE id = ${input.agentId} AND owner_id = ${ownerId} LIMIT 1`;
+    if (!agentRows.length) throw new Error("Choose one of your agents");
+  }
   const now = new Date().toISOString();
   const task: AgentTask = {
     id: crypto.randomUUID(), title: input.title, summary: input.summary, status: "queued", priority: "normal",
@@ -138,6 +144,72 @@ export async function createTask(ownerId: string, input: { title: string; summar
         VALUES (${task.messages[0].id}, ${ownerId}, ${task.id}, 'user', 'You', ${input.summary}, ${now})`,
   ]);
   return task;
+}
+
+const delegationMarkerPrefix = "delegation-call:";
+
+async function stableUuid(value: string) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export async function findDelegatedTask(ownerId: string, parentTaskId: string, parentInteractionId: string, callId: string): Promise<AgentTask | undefined> {
+  const sql = database();
+  const marker = `${delegationMarkerPrefix}${parentInteractionId}:${callId}`;
+  const rows = await sql`
+    SELECT t.id
+    FROM tasks t
+    JOIN messages m ON m.task_id = t.id AND m.owner_id = t.owner_id
+    WHERE t.owner_id = ${ownerId} AND t.parent_task_id = ${parentTaskId}
+      AND m.role = 'system' AND m.content = ${marker}
+    LIMIT 1
+  `;
+  if (!rows[0]) return undefined;
+  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === rows[0].id);
+}
+
+export async function createDelegatedTask(ownerId: string, input: {
+  parentTaskId: string;
+  parentInteractionId: string;
+  callId: string;
+  title: string;
+  brief: string;
+  repositoryUrl?: string;
+}): Promise<AgentTask> {
+  const existing = await findDelegatedTask(ownerId, input.parentTaskId, input.parentInteractionId, input.callId);
+  if (existing) return existing;
+
+  const sql = database();
+  const now = new Date().toISOString();
+  const marker = `${delegationMarkerPrefix}${input.parentInteractionId}:${input.callId}`;
+  const taskId = await stableUuid(`${ownerId}:${input.parentTaskId}:${marker}`);
+  const userMessageId = await stableUuid(`${taskId}:user`);
+  const markerMessageId = await stableUuid(`${taskId}:marker`);
+  await sql.transaction([
+    sql`INSERT INTO tasks (id, owner_id, title, summary, status, priority, agent_id, repository_url, parent_task_id, created_at, updated_at)
+        VALUES (${taskId}, ${ownerId}, ${input.title}, ${input.brief}, 'queued', 'normal', ${GENERAL_AGENT_ID}, ${input.repositoryUrl ?? null}, ${input.parentTaskId}, ${now}, ${now})
+        ON CONFLICT (id) DO NOTHING`,
+    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
+        VALUES (${markerMessageId}, ${ownerId}, ${taskId}, 'system', 'Console', ${marker}, ${now})
+        ON CONFLICT (id) DO NOTHING`,
+    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
+        VALUES (${userMessageId}, ${ownerId}, ${taskId}, 'user', 'General', ${input.brief}, ${now})
+        ON CONFLICT (id) DO NOTHING`,
+  ]);
+  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
+}
+
+export async function claimDelegatedTaskStart(ownerId: string, taskId: string): Promise<boolean> {
+  const sql = database();
+  const rows = await sql`
+    UPDATE tasks SET status = 'running', updated_at = ${new Date().toISOString()}
+    WHERE id = ${taskId} AND owner_id = ${ownerId} AND status = 'queued' AND interaction_id IS NULL
+    RETURNING id
+  `;
+  return rows.length === 1;
 }
 
 export async function appendUserMessage(ownerId: string, taskId: string, content: string): Promise<AgentTask> {
@@ -165,12 +237,32 @@ export async function completeRun(ownerId: string, taskId: string, result: { int
     LIMIT 1
   `;
   if (!rows.length) throw new Error("Task not found");
-  const author = String(rows[0].agent_name ?? "Agent");
+  const author = rows[0].agent_id === GENERAL_AGENT_ID ? generalAgent.name : String(rows[0].agent_name ?? "Agent");
   await sql.transaction([
     sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, steps, created_at)
         VALUES (${crypto.randomUUID()}, ${ownerId}, ${taskId}, 'agent', ${author}, ${result.output}, ${JSON.stringify(result.steps ?? [])}, ${now})`,
     sql`UPDATE tasks SET status = ${result.status}, interaction_id = ${result.interactionId}, updated_at = ${now}
         WHERE id = ${taskId} AND owner_id = ${ownerId}`,
+  ]);
+  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
+}
+
+export async function failRun(ownerId: string, taskId: string, output: string): Promise<AgentTask> {
+  const sql = database();
+  const now = new Date().toISOString();
+  const rows = await sql`
+    SELECT t.agent_id, a.name AS agent_name
+    FROM tasks t
+    LEFT JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
+    WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
+    LIMIT 1
+  `;
+  if (!rows.length) throw new Error("Task not found");
+  const author = rows[0].agent_id === GENERAL_AGENT_ID ? generalAgent.name : String(rows[0].agent_name ?? "Agent");
+  await sql.transaction([
+    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
+        VALUES (${crypto.randomUUID()}, ${ownerId}, ${taskId}, 'agent', ${author}, ${output}, ${now})`,
+    sql`UPDATE tasks SET status = 'failed', updated_at = ${now} WHERE id = ${taskId} AND owner_id = ${ownerId}`,
   ]);
   return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
 }

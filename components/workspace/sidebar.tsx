@@ -10,6 +10,8 @@ export function Sidebar({ agents, tasks, filter, onFilter, onNewTask, onAddAgent
   onNewTask: () => void;
   onAddAgent: () => void;
 }) {
+  const builtInAgents = agents.filter((agent) => agent.builtIn);
+  const customAgents = agents.filter((agent) => !agent.builtIn);
   const counts: Record<TaskFilter, number> = {
     all: tasks.length,
     active: tasks.filter((task) => task.status === "queued" || task.status === "running").length,
@@ -33,10 +35,22 @@ export function Sidebar({ agents, tasks, filter, onFilter, onNewTask, onAddAgent
           return <button className={`nav-item ${filter === item.filter ? "active" : ""}`} type="button" key={item.filter} onClick={() => onFilter(item.filter)}><Icon size={17} /><span>{item.label}</span><span className="nav-count">{counts[item.filter]}</span></button>;
         })}
       </nav>
+      <div className="sidebar-section sidebar-section-built-in">
+        <div className="section-label"><span>Built in</span></div>
+        <div className="agent-mini-list">
+          {builtInAgents.map((agent) => (
+            <div className="agent-mini" key={agent.id}>
+              <span className="avatar avatar-small" style={{ background: agent.color }}>{agent.initials}</span>
+              <span className="agent-mini-copy"><strong>{agent.name}</strong><small>{agent.specialty}</small></span>
+              <span className={`presence presence-${agent.status}`} aria-label={agent.status} />
+            </div>
+          ))}
+        </div>
+      </div>
       <div className="sidebar-section">
         <div className="section-label"><span>Your agents</span><button aria-label="Add agent" type="button" onClick={onAddAgent}><Plus size={14} /></button></div>
-        {agents.length ? <div className="agent-mini-list">
-          {agents.map((agent) => (
+        {customAgents.length ? <div className="agent-mini-list">
+          {customAgents.map((agent) => (
             <div className="agent-mini" key={agent.id}>
               <span className="avatar avatar-small" style={{ background: agent.color }}>{agent.initials}</span>
               <span className="agent-mini-copy"><strong>{agent.name}</strong><small>{agent.status === "working" ? "Working now" : agent.specialty}</small></span>

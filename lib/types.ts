@@ -12,6 +12,7 @@ export interface AgentProfile {
   instructions: string;
   status: AgentStatus;
   color: string;
+  builtIn?: boolean;
 }
 
 export interface RunStep {
@@ -53,6 +54,7 @@ export interface AgentTask {
   interactionId?: string;
   environmentId?: string;
   repositoryUrl?: string;
+  parentTaskId?: string;
 }
 
 export interface WorkspaceSnapshot {
