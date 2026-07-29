@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowUp, Bot, Check, ChevronDown, Code2, FileText, MoreHorizontal, PanelRight, Search, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowUp, Bot, Check, ChevronDown, Code2, FileText, Search, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Status } from "@/components/workspace/status";
 import type { AgentProfile, AgentTask, RunStep } from "@/lib/types";
@@ -11,14 +11,13 @@ function messageTime(value: string) {
   return new Date(value).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-export function TaskThread({ task, childTasks, agent, sending, onSend, onBack, onToggleContext }: {
+export function TaskThread({ task, childTasks, agent, sending, onSend, onBack }: {
   task: AgentTask;
   childTasks: AgentTask[];
   agent?: AgentProfile;
   sending: boolean;
   onSend: (content: string) => Promise<void>;
   onBack: () => void;
-  onToggleContext: () => void;
 }) {
   const [content, setContent] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -37,7 +36,6 @@ export function TaskThread({ task, childTasks, agent, sending, onSend, onBack, o
       <header className="thread-header">
         <button className="mobile-back icon-button" type="button" onClick={onBack} aria-label="Back to tasks"><ArrowLeft size={18} /></button>
         <div className="thread-heading"><h2>{task.title}</h2><div><Status status={task.status} compact /><span>with {agent?.name ?? "Agent"}</span></div></div>
-        <div className="thread-actions"><button className="icon-button" type="button" onClick={onToggleContext} aria-label="Toggle task context"><PanelRight size={18} /></button><button className="icon-button" type="button" aria-label="More options"><MoreHorizontal size={18} /></button></div>
       </header>
       <div className="message-scroll">
         <div className="conversation-date"><span>Task started {new Date(task.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })}</span></div>

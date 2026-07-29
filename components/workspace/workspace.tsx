@@ -2,10 +2,8 @@
 
 import { ArrowRight, Bot } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { ContextPanel } from "@/components/workspace/context-panel";
 import { NewAgentDialog } from "@/components/workspace/new-agent-dialog";
 import { NewTaskDialog } from "@/components/workspace/new-task-dialog";
-import { Sidebar } from "@/components/workspace/sidebar";
 import { TaskList, type TaskFilter } from "@/components/workspace/task-list";
 import { TaskThread } from "@/components/workspace/task-thread";
 import type { AgentProfile, WorkspaceSnapshot } from "@/lib/types";
@@ -14,7 +12,6 @@ export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnaps
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [selectedId, setSelectedId] = useState(initialSnapshot.tasks.find((task) => !task.parentTaskId)?.id ?? "");
   const [filter, setFilter] = useState<TaskFilter>("all");
-  const [contextOpen, setContextOpen] = useState(true);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [openTaskAfterAgent, setOpenTaskAfterAgent] = useState(false);
@@ -44,7 +41,7 @@ export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnaps
     return () => { active = false; window.clearTimeout(timer); };
   }, [selectedTask]);
 
-  function selectTask(id: string) { setSelectedId(id); setMobileThread(true); setContextOpen(false); }
+  function selectTask(id: string) { setSelectedId(id); setMobileThread(true); }
   function requestNewTask() {
     if (!snapshot.agents.length) {
       setOpenTaskAfterAgent(true);
@@ -82,12 +79,10 @@ export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnaps
     setSnapshot((current) => ({ ...current, tasks: [body, ...current.tasks] })); setSelectedId(body.id); setFilter("all"); setMobileThread(true);
   }
 
-  return <div className={`workspace-shell ${mobileThread ? "show-mobile-thread" : ""} ${contextOpen ? "context-is-open" : ""}`}>
-    <Sidebar agents={snapshot.agents} tasks={rootTasks} filter={filter} onFilter={setFilter} onNewTask={requestNewTask} onAddAgent={() => { setOpenTaskAfterAgent(false); setNewAgentOpen(true); }} />
+  return <div className={`workspace-shell ${mobileThread ? "show-mobile-thread" : ""}`}>
     <div className="app-surface">
-      <TaskList tasks={rootTasks} agents={snapshot.agents} selectedId={selectedTask?.id ?? ""} filter={filter} onFilter={setFilter} onSelect={selectTask} onNewTask={requestNewTask} />
-      {selectedTask ? <TaskThread task={selectedTask} childTasks={childTasks} agent={selectedAgent} sending={sending} onSend={sendMessage} onBack={() => setMobileThread(false)} onToggleContext={() => setContextOpen((value) => !value)} /> : null}
-      {selectedTask && contextOpen ? <ContextPanel task={selectedTask} agent={selectedAgent} onClose={() => setContextOpen(false)} /> : null}
+      <TaskList tasks={rootTasks} agents={snapshot.agents} selectedId={selectedTask?.id ?? ""} filter={filter} onFilter={setFilter} onSelect={selectTask} onNewTask={requestNewTask} onAddAgent={() => { setOpenTaskAfterAgent(false); setNewAgentOpen(true); }} />
+      {selectedTask ? <TaskThread task={selectedTask} childTasks={childTasks} agent={selectedAgent} sending={sending} onSend={sendMessage} onBack={() => setMobileThread(false)} /> : null}
       {!selectedTask ? <EmptyWorkspace hasAgents={snapshot.agents.length > 0} onAction={snapshot.agents.length ? requestNewTask : () => { setOpenTaskAfterAgent(false); setNewAgentOpen(true); }} /> : null}
     </div>
     {error ? <button className="error-toast" type="button" onClick={() => setError(undefined)}>{error}<XIcon /></button> : null}

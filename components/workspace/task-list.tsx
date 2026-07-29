@@ -1,4 +1,4 @@
-import { ChevronRight, Plus } from "lucide-react";
+import { ChevronRight, Plus, Sparkles, UserRoundPlus } from "lucide-react";
 import { Status } from "@/components/workspace/status";
 import type { AgentProfile, AgentTask, TaskStatus } from "@/lib/types";
 
@@ -26,7 +26,7 @@ function relativeTime(value: string) {
     : day;
 }
 
-export function TaskList({ tasks, agents, selectedId, filter, onFilter, onSelect, onNewTask }: {
+export function TaskList({ tasks, agents, selectedId, filter, onFilter, onSelect, onNewTask, onAddAgent }: {
   tasks: AgentTask[];
   agents: AgentProfile[];
   selectedId: string;
@@ -34,14 +34,13 @@ export function TaskList({ tasks, agents, selectedId, filter, onFilter, onSelect
   onFilter: (filter: TaskFilter) => void;
   onSelect: (id: string) => void;
   onNewTask: () => void;
+  onAddAgent: () => void;
 }) {
   const visibleTasks = tasks.filter((task) => matchesFilter(task.status, filter));
   return (
     <section className="task-list-panel" aria-label="Tasks">
-      <header className="task-list-header">
-        <div><p>Wednesday, July 29</p><h1>Today</h1></div>
-        <button className="icon-button filled" type="button" onClick={onNewTask} aria-label="New task"><Plus size={18} /></button>
-      </header>
+      <header className="task-list-header"><span className="brand-mark"><Sparkles size={17} /></span><strong>Console</strong></header>
+      <button className="new-task-button" type="button" onClick={onNewTask}><Plus size={17} />New task</button>
       <div className="filters" role="tablist" aria-label="Filter tasks">
         {filters.map((item) => <button key={item.value} className={filter === item.value ? "active" : ""} onClick={() => onFilter(item.value)} type="button" role="tab" aria-selected={filter === item.value}>{item.label}</button>)}
       </div>
@@ -61,6 +60,9 @@ export function TaskList({ tasks, agents, selectedId, filter, onFilter, onSelect
           );
         }) : <div className="empty-list"><strong>Nothing here</strong><span>This view is clear for now.</span></div>}
       </div>
+      <footer className="task-list-footer">
+        <button type="button" onClick={onAddAgent}><UserRoundPlus size={16} /><span>New agent</span></button>
+      </footer>
     </section>
   );
 }
