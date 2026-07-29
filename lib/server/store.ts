@@ -301,7 +301,7 @@ export async function completeRun(ownerId: string, taskId: string, result: { int
           status = ${result.status},
           interaction_id = ${result.interactionId},
           environment_id = COALESCE(${result.environmentId ?? null}, environment_id),
-          environment_version = CASE WHEN ${result.environmentId ?? null} IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
+          environment_version = CASE WHEN CAST(${result.environmentId ?? null} AS text) IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
           updated_at = ${now}
         WHERE id = ${taskId} AND owner_id = ${ownerId}`,
   ]);
@@ -335,7 +335,7 @@ export async function markRunStarted(ownerId: string, taskId: string, result: { 
       status = 'running',
       interaction_id = ${result.interactionId},
       environment_id = COALESCE(${result.environmentId ?? null}, environment_id),
-      environment_version = CASE WHEN ${result.environmentId ?? null} IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
+      environment_version = CASE WHEN CAST(${result.environmentId ?? null} AS text) IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
       updated_at = ${now}
     WHERE id = ${taskId} AND owner_id = ${ownerId} RETURNING id`;
   if (!rows.length) throw new Error("Task not found");
