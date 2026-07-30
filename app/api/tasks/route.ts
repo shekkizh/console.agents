@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { GENERAL_AGENT_ID } from "@/lib/general-agent";
 import { requireOwner } from "@/lib/server/auth";
+import { advanceDelegations } from "@/lib/server/delegation";
 import { runManagedAgent } from "@/lib/server/gemini";
 import { completeRun, createTask, failRun, getLatestAgentEnvironment, getTaskAgent, markRunStarted } from "@/lib/server/store";
+
+export const maxDuration = 300;
 
 const createTaskSchema = z.object({
   title: z.string().trim().min(2).max(120),
@@ -26,12 +28,17 @@ export async function POST(request: Request) {
     try {
       const environmentId = await getLatestAgentEnvironment(ownerId, task.agentId);
       const result = await runManagedAgent(task.summary, undefined, environmentId, task.repositoryUrl, agent, {
-        allowDelegation: agent.id === GENERAL_AGENT_ID,
+        enablePlatformTools: true,
         ownerId,
       });
-      updated = result.status === "completed" || result.status === "failed"
-        ? await completeRun(ownerId, task.id, { ...result, status: result.status })
-        : await markRunStarted(ownerId, task.id, result);
+      if (result.status === "requires_action") {
+        const started = await markRunStarted(ownerId, task.id, result);
+        updated = await advanceDelegations(ownerId, started, result);
+      } else {
+        updated = result.status === "completed" || result.status === "failed"
+          ? await completeRun(ownerId, task.id, { ...result, status: result.status })
+          : await markRunStarted(ownerId, task.id, result);
+      }
     } catch (error) {
       updated = await failRun(ownerId, task.id, error instanceof Error ? error.message : "Unable to start the managed run.");
     }

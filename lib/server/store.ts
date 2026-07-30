@@ -229,6 +229,8 @@ export async function createDelegatedTask(ownerId: string, input: {
   callId: string;
   title: string;
   brief: string;
+  agentId: string;
+  requesterName: string;
   repositoryUrl?: string;
 }): Promise<AgentTask> {
   const existing = await findDelegatedTask(ownerId, input.parentTaskId, input.parentInteractionId, input.callId);
@@ -242,13 +244,13 @@ export async function createDelegatedTask(ownerId: string, input: {
   const markerMessageId = await stableUuid(`${taskId}:marker`);
   await sql.transaction([
     sql`INSERT INTO tasks (id, owner_id, title, summary, status, priority, agent_id, repository_url, parent_task_id, created_at, updated_at)
-        VALUES (${taskId}, ${ownerId}, ${input.title}, ${input.brief}, 'queued', 'normal', ${GENERAL_AGENT_ID}, ${input.repositoryUrl ?? null}, ${input.parentTaskId}, ${now}, ${now})
+        VALUES (${taskId}, ${ownerId}, ${input.title}, ${input.brief}, 'queued', 'normal', ${input.agentId}, ${input.repositoryUrl ?? null}, ${input.parentTaskId}, ${now}, ${now})
         ON CONFLICT (id) DO NOTHING`,
     sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
         VALUES (${markerMessageId}, ${ownerId}, ${taskId}, 'system', 'Console', ${marker}, ${now})
         ON CONFLICT (id) DO NOTHING`,
     sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
-        VALUES (${userMessageId}, ${ownerId}, ${taskId}, 'user', 'General', ${input.brief}, ${now})
+        VALUES (${userMessageId}, ${ownerId}, ${taskId}, 'user', ${input.requesterName}, ${input.brief}, ${now})
         ON CONFLICT (id) DO NOTHING`,
   ]);
   return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
@@ -275,6 +277,8 @@ export async function appendUserMessage(ownerId: string, taskId: string, content
         VALUES (${message.id}, ${ownerId}, ${taskId}, 'user', 'You', ${content}, ${now})`,
     sql`UPDATE tasks SET
           interaction_id = CASE WHEN status = 'failed' THEN NULL ELSE interaction_id END,
+          environment_id = CASE WHEN status = 'failed' THEN NULL ELSE environment_id END,
+          environment_version = CASE WHEN status = 'failed' THEN 0 ELSE environment_version END,
           status = 'running',
           updated_at = ${now}
         WHERE id = ${taskId} AND owner_id = ${ownerId}`,

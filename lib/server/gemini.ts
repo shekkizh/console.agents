@@ -1,7 +1,6 @@
 import "server-only";
 
-import { GENERAL_AGENT_ID, generalAgent } from "@/lib/general-agent";
-import { generalPlatformTools, toFunctionResultStep } from "@/lib/server/agent-tools";
+import { agentPlatformTools, toFunctionResultStep } from "@/lib/server/agent-tools";
 import { config, requireGeminiApiKey } from "@/lib/server/config";
 import { managedEnvironment } from "@/lib/server/console-platform-skill";
 import { interactionOutputText, stepText, type GeminiInteractionPayload } from "@/lib/server/gemini-response";
@@ -27,6 +26,8 @@ export interface FunctionResultInput {
   name: string;
   result: Record<string, unknown>;
 }
+
+const platformInstruction = "You are a peer in a persistent multi-agent Console. You can list agents, create agents, and send tasks or messages to other agents with the provided Console platform tools. A sandbox file or process is not a Console agent.";
 
 function normalizeSteps(payload: GeminiInteractionPayload): RunStep[] {
   const rawSteps = payload.steps ?? payload.outputs ?? [];
@@ -100,11 +101,11 @@ async function postInteraction(body: Record<string, unknown>): Promise<ManagedRu
 }
 
 export async function runManagedAgent(input: string, previousInteractionId?: string, environmentId?: string, repositoryUrl?: string, agent?: AgentProfile, options?: {
-  allowDelegation?: boolean;
+  enablePlatformTools?: boolean;
   maxTotalTokens?: number;
   ownerId?: string;
 }): Promise<ManagedRunResult> {
-  const allowDelegation = Boolean(options?.allowDelegation && agent?.id === GENERAL_AGENT_ID);
+  const enablePlatformTools = Boolean(options?.enablePlatformTools && agent);
   const isSavedManagedAgent = Boolean(agent && !agent.builtIn && agent.id.startsWith("console-"));
   const targetAgentId = isSavedManagedAgent ? agent!.id : config.geminiAgentId;
   const acceptsAgentConfig = targetAgentId.startsWith("antigravity-");
@@ -117,27 +118,27 @@ export async function runManagedAgent(input: string, previousInteractionId?: str
   return postInteraction({
     agent: targetAgentId,
     input,
-    system_instruction: agent ? `You are ${agent.name}, a ${agent.specialty}. ${agent.instructions}` : undefined,
+    system_instruction: agent ? `You are ${agent.name}, a ${agent.specialty}. ${agent.instructions} ${platformInstruction}` : undefined,
     environment,
-    background: true,
     store: true,
     ...(acceptsAgentConfig ? { agent_config: { type: "antigravity", max_total_tokens: options?.maxTotalTokens ?? 50_000 } } : {}),
-    ...(allowDelegation ? { tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, ...generalPlatformTools] } : {}),
+    ...(enablePlatformTools ? { tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, ...agentPlatformTools] } : {}),
     ...(previousInteractionId ? { previous_interaction_id: previousInteractionId } : {}),
   });
 }
 
-export async function continueManagedAgentWithFunctionResults(ownerId: string, previousInteractionId: string, environmentId: string | undefined, results: FunctionResultInput[]): Promise<ManagedRunResult> {
-  const acceptsAgentConfig = config.geminiAgentId.startsWith("antigravity-");
+export async function continueManagedAgentWithFunctionResults(ownerId: string, agent: AgentProfile, previousInteractionId: string, environmentId: string | undefined, results: FunctionResultInput[]): Promise<ManagedRunResult> {
+  const isSavedManagedAgent = !agent.builtIn && agent.id.startsWith("console-");
+  const targetAgentId = isSavedManagedAgent ? agent.id : config.geminiAgentId;
+  const acceptsAgentConfig = targetAgentId.startsWith("antigravity-");
   return postInteraction({
-    agent: config.geminiAgentId,
+    agent: targetAgentId,
     previous_interaction_id: previousInteractionId,
-    environment: await managedEnvironment(ownerId, generalAgent, environmentId),
+    environment: await managedEnvironment(ownerId, agent, environmentId),
     input: results.map(toFunctionResultStep),
-    system_instruction: `You are ${generalAgent.name}, a ${generalAgent.specialty}. ${generalAgent.instructions}`,
-    background: true,
+    system_instruction: `You are ${agent.name}, a ${agent.specialty}. ${agent.instructions} ${platformInstruction}`,
     store: true,
-    tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, ...generalPlatformTools],
+    tools: [{ type: "code_execution" }, { type: "google_search" }, { type: "url_context" }, ...agentPlatformTools],
     ...(acceptsAgentConfig ? { agent_config: { type: "antigravity", max_total_tokens: 50_000 } } : {}),
   });
 }
@@ -171,8 +172,15 @@ export async function getManagedAgentRun(interactionId: string): Promise<Managed
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions/${encodeURIComponent(interactionId)}`, {
     headers: { "x-goog-api-key": geminiApiKey, "Api-Revision": "2026-05-20" },
     cache: "no-store",
+    signal: AbortSignal.timeout(30_000),
   });
-  const payload = (await response.json()) as GeminiInteractionPayload;
+  const text = await response.text();
+  let payload: GeminiInteractionPayload;
+  try {
+    payload = JSON.parse(text) as GeminiInteractionPayload;
+  } catch {
+    throw new Error(`Gemini poll returned an invalid response (${response.status})`);
+  }
   if (!response.ok) throw new Error(payload.error?.message ?? `Gemini poll failed (${response.status})`);
   return normalizeResult(payload, interactionId);
 }

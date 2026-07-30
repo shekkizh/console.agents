@@ -30,9 +30,13 @@ export function Workspace({ initialSnapshot }: { initialSnapshot: WorkspaceSnaps
     async function poll() {
       try {
         const response = await fetch(`/api/tasks/${selectedTask.id}/run`);
-        if (response.ok && active) setSnapshot(await response.json() as WorkspaceSnapshot);
-      } catch {
-        // A later poll can recover from transient navigation or network failures.
+        const body = await response.json() as WorkspaceSnapshot & { error?: string };
+        if (response.ok && active) {
+          setSnapshot(body);
+          setError(undefined);
+        } else if (active) setError(body.error ?? "Unable to refresh the managed run");
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : "Unable to refresh the managed run");
       } finally {
         if (active) timer = window.setTimeout(poll, 5_000);
       }
