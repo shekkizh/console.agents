@@ -6,16 +6,17 @@ import { agentPlatformTools, toFunctionResultStep } from "../lib/server/agent-to
 
 test("every agent receives first-class roster and peer-task tools", () => {
   const names = agentPlatformTools.map((tool) => tool.name);
-  assert.deepEqual(names, ["list_console_agents", "create_console_agent", "send_agent_task"]);
+  assert.deepEqual(names, ["list_console_agents", "create_console_agent", "send_channel_message"]);
+
+  const channelMessageTool = agentPlatformTools.find((tool) => tool.name === "send_channel_message");
+  assert.ok(channelMessageTool);
+  assert.deepEqual(channelMessageTool.parameters.required, ["message"]);
 
   const createTool = agentPlatformTools.find((tool) => tool.name === "create_console_agent");
   assert.ok(createTool);
   assert.deepEqual(createTool.parameters.required, ["name", "specialty", "instructions"]);
   assert.match(createTool.description, /only way to fulfill/i);
 
-  const sendTool = agentPlatformTools.find((tool) => tool.name === "send_agent_task");
-  assert.ok(sendTool);
-  assert.deepEqual(sendTool.parameters.required, ["agent_id", "title", "message"]);
 });
 
 test("function results use the current Interactions content wrapper", () => {

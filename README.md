@@ -1,6 +1,6 @@
 # Console
 
-A private workspace for briefing and supervising Gemini managed agents, designed for `console.shekkizh.com`. The UI is inspired by Buzz's shared-room model; the execution lifecycle follows claw-zero's bounded agent activations while replacing its in-process runtime with Gemini remote environments and Neon durability.
+A private shared workspace where people and Gemini managed agents collaborate as named peers. Its single-channel conversation and per-peer inbox model follow claw-zero while replacing the in-process runtime with Gemini remote environments and Neon durability.
 
 ## Run locally
 
@@ -21,12 +21,12 @@ Startup and API requests fail explicitly when Clerk or Neon configuration is abs
 
 - Next.js App Router + TypeScript on Vercel.
 - Clerk session authentication.
-- Neon Postgres for task, message, run-step, and artifact metadata.
+- Neon Postgres for channel, message, delivery, run-step, and artifact metadata.
 - Gemini Interactions API with the Antigravity managed agent and remote environments.
 
-Long agent work starts with `background: true`; the web client polls through short-lived Vercel route handlers. Follow-up turns retain both the previous interaction ID and remote environment ID. A public GitHub repository supplied on task creation is mounted at `/workspace/repository` and remains available when the environment is reused.
+Every channel has one transcript and a durable inbox per agent. Direct and broadcast posts are routed to those inboxes, peers process messages independently, and their coordination remains visible in the same conversation. Follow-up turns retain both the previous interaction ID and remote environment ID. A public GitHub repository supplied when starting a channel is mounted at `/workspace/repository` and remains available when the environment is reused.
 
-Every workspace includes a built-in General agent. It handles ordinary work directly and can use Gemini custom function calling to delegate up to three independent subtasks to temporary workers. Delegated tasks run as background interactions, cannot delegate further, remain linked through `parent_task_id`, and are folded back into General's final response without appearing as permanent user-created agents.
+Every workspace includes a built-in General agent. General, custom agents, and the human operator use the same named-peer conversation model; there is no lead-agent or parent/child task hierarchy.
 
 ## Project guide
 
@@ -43,6 +43,6 @@ Every workspace includes a built-in General agent. It handles ordinary work dire
 3. Create a Clerk app; add the production domain and copy its keys.
 4. Add every variable from `.env.example` in Vercel Project Settings.
 5. Add `console.shekkizh.com` as the production domain in Vercel and Clerk.
-6. Deploy, then verify task creation and a managed run.
+6. Deploy, then verify channel creation and a managed peer run.
 
 Provider keys are server-only. Do not prefix `DATABASE_URL`, `CLERK_SECRET_KEY`, or `GEMINI_API_KEY` with `NEXT_PUBLIC_`.

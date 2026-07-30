@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS tasks (
   environment_id text,
   environment_version integer NOT NULL DEFAULT 0,
   repository_url text,
-  parent_task_id uuid REFERENCES tasks(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -45,6 +44,51 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS messages_task_created_idx ON messages(owner_id, task_id, created_at);
+
+-- Peer channels use the existing tasks row as their durable channel record.
+-- Routing fields are additive so this schema can be applied idempotently.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS author_id text;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS author_type text;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_ids text[] NOT NULL DEFAULT '{}';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'broadcast';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id uuid REFERENCES messages(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS channel_members (
+  channel_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  owner_id text NOT NULL,
+  participant_id text NOT NULL,
+  participant_type text NOT NULL CHECK (participant_type IN ('human', 'agent')),
+  display_name text NOT NULL,
+  agent_id text,
+  status text NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'working', 'offline')),
+  interaction_id text,
+  environment_id text,
+  environment_version integer NOT NULL DEFAULT 0,
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (channel_id, participant_id)
+);
+
+CREATE INDEX IF NOT EXISTS channel_members_owner_idx ON channel_members(owner_id, channel_id, joined_at);
+
+CREATE TABLE IF NOT EXISTS message_deliveries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id text NOT NULL,
+  channel_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  participant_id text NOT NULL,
+  status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'delivered', 'failed')),
+  attempts integer NOT NULL DEFAULT 0,
+  available_at timestamptz NOT NULL DEFAULT now(),
+  claimed_at timestamptz,
+  delivered_at timestamptz,
+  error_message text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (message_id, participant_id)
+);
+
+CREATE INDEX IF NOT EXISTS message_deliveries_inbox_idx
+  ON message_deliveries(owner_id, channel_id, participant_id, status, available_at, created_at);
 
 CREATE TABLE IF NOT EXISTS runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,15 +1,14 @@
-export const sendAgentTaskTool = {
+export const sendChannelMessageTool = {
   type: "function",
-  name: "send_agent_task",
-  description: "Send a message or task to another persistent Console agent and wait for its result. Use list_console_agents first when you do not know the target agent ID.",
+  name: "send_channel_message",
+  description: "Message a named peer in the current shared channel, or broadcast to the team. The message is persisted in the shared transcript and delivered asynchronously.",
   parameters: {
     type: "object",
     properties: {
-      agent_id: { type: "string", description: "The exact Console agent ID that should receive the task." },
-      title: { type: "string", description: "A short, specific label for the delegated work." },
-      message: { type: "string", description: "A self-contained message with the outcome, context, constraints, and expected return format." },
+      recipient: { type: "string", description: "Exact participant name. Omit to broadcast to the agent team." },
+      message: { type: "string", description: "The coordination message, question, assignment, or result to share." },
     },
-    required: ["agent_id", "title", "message"],
+    required: ["message"],
   },
 } as const;
 
@@ -35,7 +34,7 @@ export const createConsoleAgentTool = {
   },
 } as const;
 
-export const agentPlatformTools = [listConsoleAgentsTool, createConsoleAgentTool, sendAgentTaskTool] as const;
+export const agentPlatformTools = [listConsoleAgentsTool, createConsoleAgentTool, sendChannelMessageTool] as const;
 
 export function toFunctionResultStep(item: { callId: string; name: string; result: Record<string, unknown> }) {
   return {

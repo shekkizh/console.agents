@@ -1,6 +1,8 @@
 export type TaskStatus = "queued" | "running" | "waiting" | "completed" | "failed";
 export type AgentStatus = "ready" | "working" | "offline";
 export type MessageRole = "user" | "agent" | "system";
+export type ParticipantType = "human" | "agent";
+export type MessageDelivery = "broadcast" | "direct";
 export type StepKind = "plan" | "search" | "code" | "file" | "result";
 
 export interface AgentProfile {
@@ -23,13 +25,30 @@ export interface RunStep {
   createdAt: string;
 }
 
-export interface Message {
+export interface ChannelMessage {
   id: string;
   role: MessageRole;
   author: string;
   content: string;
   createdAt: string;
   steps?: RunStep[];
+  authorId: string;
+  authorName: string;
+  authorType: ParticipantType | "system";
+  recipientIds: string[];
+  delivery: MessageDelivery;
+  replyToId?: string;
+}
+
+export interface ChannelParticipant {
+  id: string;
+  type: ParticipantType;
+  name: string;
+  initials: string;
+  specialty?: string;
+  color: string;
+  status: AgentStatus;
+  agentId?: string;
 }
 
 export interface Artifact {
@@ -40,25 +59,29 @@ export interface Artifact {
   url?: string;
 }
 
-export interface AgentTask {
+export interface Channel {
   id: string;
   title: string;
   summary: string;
   status: TaskStatus;
-  priority: "low" | "normal" | "high";
-  agentId: string;
-  updatedAt: string;
-  createdAt: string;
-  messages: Message[];
+  participantIds: string[];
+  participants: ChannelParticipant[];
+  messages: ChannelMessage[];
   artifacts: Artifact[];
-  interactionId?: string;
-  environmentId?: string;
-  environmentVersion?: number;
   repositoryUrl?: string;
-  parentTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateChatInput {
+  title: string;
+  summary: string;
+  agentIds: string[];
+  repositoryUrl?: string;
 }
 
 export interface WorkspaceSnapshot {
   agents: AgentProfile[];
-  tasks: AgentTask[];
+  channels: Channel[];
+  currentUser: ChannelParticipant;
 }

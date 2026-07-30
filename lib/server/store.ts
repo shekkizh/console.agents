@@ -2,9 +2,9 @@ import "server-only";
 
 import { neon } from "@neondatabase/serverless";
 import { GENERAL_AGENT_ID, generalAgent } from "@/lib/general-agent";
-import { MANAGED_ENVIRONMENT_VERSION } from "@/lib/server/agent-environment-config";
+import { humanParticipant, listChannels } from "@/lib/server/channel-store";
 import { requireDatabaseUrl } from "@/lib/server/config";
-import type { AgentProfile, AgentTask, Message, WorkspaceSnapshot } from "@/lib/types";
+import type { AgentProfile, WorkspaceSnapshot } from "@/lib/types";
 
 const agentColors = ["#c8f169", "#8bb8ff", "#f0ae88", "#d7a8ff", "#77d7c2", "#ffd166"];
 
@@ -13,24 +13,6 @@ type AgentRow = {
   name: string;
   specialty: string;
   instructions: string;
-};
-
-type TaskRow = {
-  id: string;
-  title: string;
-  summary: string;
-  status: AgentTask["status"];
-  priority: AgentTask["priority"];
-  agent_id: string;
-  created_at: string;
-  updated_at: string;
-  interaction_id: string | null;
-  environment_id: string | null;
-  environment_version: number;
-  repository_url: string | null;
-  parent_task_id: string | null;
-  messages: Message[] | null;
-  artifacts: AgentTask["artifacts"] | null;
 };
 
 function database() {
@@ -62,45 +44,11 @@ function toAgentProfile(row: AgentRow): AgentProfile {
 
 export async function getWorkspace(ownerId: string): Promise<WorkspaceSnapshot> {
   const sql = database();
-  const [agentRows, taskRows] = await Promise.all([
+  const [agentRows, channels] = await Promise.all([
     sql`SELECT id, name, specialty, instructions FROM agents WHERE owner_id = ${ownerId} ORDER BY created_at ASC`,
-    sql`
-    SELECT t.*,
-      COALESCE(json_agg(DISTINCT jsonb_build_object(
-        'id', m.id, 'role', m.role, 'author', m.author, 'content', m.content,
-        'createdAt', m.created_at, 'steps', m.steps
-      )) FILTER (WHERE m.id IS NOT NULL), '[]') AS messages,
-      COALESCE(json_agg(DISTINCT jsonb_build_object(
-        'id', a.id, 'name', a.name, 'kind', a.kind, 'size', a.size, 'url', a.url
-      )) FILTER (WHERE a.id IS NOT NULL), '[]') AS artifacts
-    FROM tasks t
-    LEFT JOIN messages m ON m.task_id = t.id AND m.owner_id = t.owner_id
-    LEFT JOIN artifacts a ON a.task_id = t.id AND a.owner_id = t.owner_id
-    WHERE t.owner_id = ${ownerId}
-    GROUP BY t.id
-    ORDER BY t.updated_at DESC
-  `,
+    listChannels(ownerId),
   ]);
-
-  const tasks = (taskRows as TaskRow[]).map((row) => ({
-    id: row.id,
-    title: row.title,
-    summary: row.summary,
-    status: row.status,
-    priority: row.priority,
-    agentId: row.agent_id,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    interactionId: row.interaction_id ?? undefined,
-    environmentId: row.environment_id ?? undefined,
-    environmentVersion: row.environment_version,
-    repositoryUrl: row.repository_url ?? undefined,
-    parentTaskId: row.parent_task_id ?? undefined,
-    messages: (row.messages ?? []).toSorted((a, b) => a.createdAt.localeCompare(b.createdAt)),
-    artifacts: row.artifacts ?? [],
-  }));
-
-  return { agents: [generalAgent, ...(agentRows as AgentRow[]).map(toAgentProfile)], tasks };
+  return { agents: [generalAgent, ...(agentRows as AgentRow[]).map(toAgentProfile)], channels, currentUser: humanParticipant(ownerId) };
 }
 
 export async function listAgents(ownerId: string): Promise<AgentProfile[]> {
@@ -149,199 +97,4 @@ export async function updateAgent(ownerId: string, agentId: string, input: { nam
   `;
   if (!rows.length) throw new Error("Agent not found");
   return toAgentProfile(rows[0] as AgentRow);
-}
-
-export async function getLatestAgentEnvironment(ownerId: string, agentId: string): Promise<string | undefined> {
-  const sql = database();
-  const rows = await sql`
-    SELECT environment_id FROM tasks
-    WHERE owner_id = ${ownerId} AND agent_id = ${agentId} AND environment_id IS NOT NULL
-      AND environment_version >= ${MANAGED_ENVIRONMENT_VERSION}
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `;
-  return rows[0]?.environment_id ? String(rows[0].environment_id) : undefined;
-}
-
-export async function getTaskAgent(ownerId: string, taskId: string): Promise<AgentProfile | undefined> {
-  const sql = database();
-  const rows = await sql`
-    SELECT t.agent_id, a.id, a.name, a.specialty, a.instructions
-    FROM tasks t
-    LEFT JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
-    WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
-    LIMIT 1
-  `;
-  if (rows[0]?.agent_id === GENERAL_AGENT_ID) return generalAgent;
-  return rows[0] ? toAgentProfile(rows[0] as AgentRow) : undefined;
-}
-
-export async function createTask(ownerId: string, input: { title: string; summary: string; agentId: string; repositoryUrl?: string }): Promise<AgentTask> {
-  const sql = database();
-  if (input.agentId !== GENERAL_AGENT_ID) {
-    const agentRows = await sql`SELECT id FROM agents WHERE id = ${input.agentId} AND owner_id = ${ownerId} LIMIT 1`;
-    if (!agentRows.length) throw new Error("Choose one of your agents");
-  }
-  const now = new Date().toISOString();
-  const task: AgentTask = {
-    id: crypto.randomUUID(), title: input.title, summary: input.summary, status: "queued", priority: "normal",
-    agentId: input.agentId, createdAt: now, updatedAt: now, artifacts: [], repositoryUrl: input.repositoryUrl,
-    messages: [{ id: crypto.randomUUID(), role: "user", author: "You", content: input.summary, createdAt: now }],
-  };
-
-  await sql.transaction([
-    sql`INSERT INTO tasks (id, owner_id, title, summary, status, priority, agent_id, repository_url, created_at, updated_at)
-        VALUES (${task.id}, ${ownerId}, ${task.title}, ${task.summary}, ${task.status}, ${task.priority}, ${task.agentId}, ${task.repositoryUrl ?? null}, ${now}, ${now})`,
-    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
-        VALUES (${task.messages[0].id}, ${ownerId}, ${task.id}, 'user', 'You', ${input.summary}, ${now})`,
-  ]);
-  return task;
-}
-
-const delegationMarkerPrefix = "delegation-call:";
-
-async function stableUuid(value: string) {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
-  digest[6] = (digest[6] & 0x0f) | 0x50;
-  digest[8] = (digest[8] & 0x3f) | 0x80;
-  const hex = Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-export async function findDelegatedTask(ownerId: string, parentTaskId: string, parentInteractionId: string, callId: string): Promise<AgentTask | undefined> {
-  const sql = database();
-  const marker = `${delegationMarkerPrefix}${parentInteractionId}:${callId}`;
-  const rows = await sql`
-    SELECT t.id
-    FROM tasks t
-    JOIN messages m ON m.task_id = t.id AND m.owner_id = t.owner_id
-    WHERE t.owner_id = ${ownerId} AND t.parent_task_id = ${parentTaskId}
-      AND m.role = 'system' AND m.content = ${marker}
-    LIMIT 1
-  `;
-  if (!rows[0]) return undefined;
-  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === rows[0].id);
-}
-
-export async function createDelegatedTask(ownerId: string, input: {
-  parentTaskId: string;
-  parentInteractionId: string;
-  callId: string;
-  title: string;
-  brief: string;
-  agentId: string;
-  requesterName: string;
-  repositoryUrl?: string;
-}): Promise<AgentTask> {
-  const existing = await findDelegatedTask(ownerId, input.parentTaskId, input.parentInteractionId, input.callId);
-  if (existing) return existing;
-
-  const sql = database();
-  const now = new Date().toISOString();
-  const marker = `${delegationMarkerPrefix}${input.parentInteractionId}:${input.callId}`;
-  const taskId = await stableUuid(`${ownerId}:${input.parentTaskId}:${marker}`);
-  const userMessageId = await stableUuid(`${taskId}:user`);
-  const markerMessageId = await stableUuid(`${taskId}:marker`);
-  await sql.transaction([
-    sql`INSERT INTO tasks (id, owner_id, title, summary, status, priority, agent_id, repository_url, parent_task_id, created_at, updated_at)
-        VALUES (${taskId}, ${ownerId}, ${input.title}, ${input.brief}, 'queued', 'normal', ${input.agentId}, ${input.repositoryUrl ?? null}, ${input.parentTaskId}, ${now}, ${now})
-        ON CONFLICT (id) DO NOTHING`,
-    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
-        VALUES (${markerMessageId}, ${ownerId}, ${taskId}, 'system', 'Console', ${marker}, ${now})
-        ON CONFLICT (id) DO NOTHING`,
-    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
-        VALUES (${userMessageId}, ${ownerId}, ${taskId}, 'user', ${input.requesterName}, ${input.brief}, ${now})
-        ON CONFLICT (id) DO NOTHING`,
-  ]);
-  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
-}
-
-export async function claimDelegatedTaskStart(ownerId: string, taskId: string): Promise<boolean> {
-  const sql = database();
-  const rows = await sql`
-    UPDATE tasks SET status = 'running', updated_at = ${new Date().toISOString()}
-    WHERE id = ${taskId} AND owner_id = ${ownerId} AND status = 'queued' AND interaction_id IS NULL
-    RETURNING id
-  `;
-  return rows.length === 1;
-}
-
-export async function appendUserMessage(ownerId: string, taskId: string, content: string): Promise<AgentTask> {
-  const sql = database();
-  const now = new Date().toISOString();
-  const message: Message = { id: crypto.randomUUID(), role: "user", author: "You", content, createdAt: now };
-  const rows = await sql`SELECT id FROM tasks WHERE id = ${taskId} AND owner_id = ${ownerId} LIMIT 1`;
-  if (!rows.length) throw new Error("Task not found");
-  await sql.transaction([
-    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
-        VALUES (${message.id}, ${ownerId}, ${taskId}, 'user', 'You', ${content}, ${now})`,
-    sql`UPDATE tasks SET
-          interaction_id = CASE WHEN status = 'failed' THEN NULL ELSE interaction_id END,
-          environment_id = CASE WHEN status = 'failed' THEN NULL ELSE environment_id END,
-          environment_version = CASE WHEN status = 'failed' THEN 0 ELSE environment_version END,
-          status = 'running',
-          updated_at = ${now}
-        WHERE id = ${taskId} AND owner_id = ${ownerId}`,
-  ]);
-  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
-}
-
-export async function completeRun(ownerId: string, taskId: string, result: { interactionId: string; environmentId?: string; output: string; steps: Message["steps"]; status: "completed" | "running" | "failed" }): Promise<AgentTask> {
-  const sql = database();
-  const now = new Date().toISOString();
-  const rows = await sql`
-    SELECT t.agent_id, a.name AS agent_name
-    FROM tasks t
-    LEFT JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
-    WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
-    LIMIT 1
-  `;
-  if (!rows.length) throw new Error("Task not found");
-  const author = rows[0].agent_id === GENERAL_AGENT_ID ? generalAgent.name : String(rows[0].agent_name ?? "Agent");
-  await sql.transaction([
-    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, steps, created_at)
-        VALUES (${crypto.randomUUID()}, ${ownerId}, ${taskId}, 'agent', ${author}, ${result.output}, ${JSON.stringify(result.steps ?? [])}, ${now})`,
-    sql`UPDATE tasks SET
-          status = ${result.status},
-          interaction_id = ${result.interactionId},
-          environment_id = COALESCE(${result.environmentId ?? null}, environment_id),
-          environment_version = CASE WHEN CAST(${result.environmentId ?? null} AS text) IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
-          updated_at = ${now}
-        WHERE id = ${taskId} AND owner_id = ${ownerId}`,
-  ]);
-  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
-}
-
-export async function failRun(ownerId: string, taskId: string, output: string): Promise<AgentTask> {
-  const sql = database();
-  const now = new Date().toISOString();
-  const rows = await sql`
-    SELECT t.agent_id, a.name AS agent_name
-    FROM tasks t
-    LEFT JOIN agents a ON a.id = t.agent_id AND a.owner_id = t.owner_id
-    WHERE t.id = ${taskId} AND t.owner_id = ${ownerId}
-    LIMIT 1
-  `;
-  if (!rows.length) throw new Error("Task not found");
-  const author = rows[0].agent_id === GENERAL_AGENT_ID ? generalAgent.name : String(rows[0].agent_name ?? "Agent");
-  await sql.transaction([
-    sql`INSERT INTO messages (id, owner_id, task_id, role, author, content, created_at)
-        VALUES (${crypto.randomUUID()}, ${ownerId}, ${taskId}, 'agent', ${author}, ${output}, ${now})`,
-    sql`UPDATE tasks SET status = 'failed', updated_at = ${now} WHERE id = ${taskId} AND owner_id = ${ownerId}`,
-  ]);
-  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
-}
-
-export async function markRunStarted(ownerId: string, taskId: string, result: { interactionId: string; environmentId?: string }): Promise<AgentTask> {
-  const sql = database();
-  const now = new Date().toISOString();
-  const rows = await sql`UPDATE tasks SET
-      status = 'running',
-      interaction_id = ${result.interactionId},
-      environment_id = COALESCE(${result.environmentId ?? null}, environment_id),
-      environment_version = CASE WHEN CAST(${result.environmentId ?? null} AS text) IS NOT NULL THEN ${MANAGED_ENVIRONMENT_VERSION} ELSE environment_version END,
-      updated_at = ${now}
-    WHERE id = ${taskId} AND owner_id = ${ownerId} RETURNING id`;
-  if (!rows.length) throw new Error("Task not found");
-  return (await getWorkspace(ownerId)).tasks.find((task) => task.id === taskId)!;
 }
