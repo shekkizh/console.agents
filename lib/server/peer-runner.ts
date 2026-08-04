@@ -101,6 +101,11 @@ async function activatePeer(ownerId: string, channelId: string, participant: Cha
     await completeChannelDelivery(ownerId, delivery.id, result.status === "failed" ? "failed" : "delivered", result.status === "failed" ? result.output : undefined);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to run channel peer";
+    if (message.includes("429")) {
+      await updateChannelMemberRun(ownerId, channelId, participant.id, { status: "offline" });
+      await completeChannelDelivery(ownerId, delivery.id, "queued");
+      return false;
+    }
     await postChannelMessage(ownerId, channelId, {
       senderId: participant.id, senderType: "agent", senderName: participant.name,
       content: message, recipientIds: [delivery.message.authorId],
@@ -117,7 +122,7 @@ export async function runPeerChannel(ownerId: string, channelId: string): Promis
   for (let round = 0; round < 12; round += 1) {
     const channel = await getChannel(ownerId, channelId);
     if (!channel) throw new Error("Channel not found");
-    const agents = channel.participants.filter((participant) => participant.type === "agent");
+    const agents = channel.participants.filter((participant) => participant.type === "agent" && participant.status !== "offline");
     const activated = await Promise.all(agents.map((participant) => activatePeer(ownerId, channelId, participant)));
     if (!activated.some(Boolean)) break;
   }
