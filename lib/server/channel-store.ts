@@ -284,8 +284,12 @@ export async function claimChannelDeliveries(ownerId: string, channelId: string,
   });
 }
 
-export async function completeChannelDelivery(ownerId: string, deliveryId: string, status: "delivered" | "failed", error?: string): Promise<void> {
+export async function completeChannelDelivery(ownerId: string, deliveryId: string, status: "delivered" | "failed" | "queued", error?: string): Promise<void> {
   const sql = database();
+  if (status === "queued") {
+    await sql`UPDATE message_deliveries SET status = 'queued', attempts = GREATEST(0, attempts - 1), claimed_at = null WHERE id = ${deliveryId} AND owner_id = ${ownerId} AND status = 'processing'`;
+    return;
+  }
   await sql`UPDATE message_deliveries SET status = ${status}, delivered_at = now(), error_message = ${error ?? null}
       WHERE id = ${deliveryId} AND owner_id = ${ownerId} AND status = 'processing'`;
 }

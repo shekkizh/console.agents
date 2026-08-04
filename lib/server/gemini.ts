@@ -153,6 +153,7 @@ export async function createManagedAgentDefinition(ownerId: string, id: string, 
     },
     body: JSON.stringify({
       id,
+      display_name: agent.name,
       description: agent.specialty,
       base_agent: "antigravity-preview-05-2026",
       agent_config: { type: "antigravity" },
