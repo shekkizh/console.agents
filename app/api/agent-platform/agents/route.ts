@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAgentPlatformIdentity } from "@/lib/server/agent-platform-auth";
-import { createManagedAgentDefinition } from "@/lib/server/gemini";
 import { createAgent, findAgentByName, listAgents } from "@/lib/server/store";
 
 const createAgentSchema = z.object({
