@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAgentPlatformIdentity } from "@/lib/server/agent-platform-auth";
-import { createManagedAgentDefinition } from "@/lib/server/gemini";
 import { createAgent, findAgentByName, listAgents } from "@/lib/server/store";
 
 const createAgentSchema = z.object({
@@ -32,7 +31,6 @@ export async function POST(request: Request) {
     if (existing) return NextResponse.json({ success: true, created: false, actor_agent_id: actorAgentId, agent: existing });
 
     const id = `console-${crypto.randomUUID()}`;
-    await createManagedAgentDefinition(ownerId, id, input);
     const agent = await createAgent(ownerId, id, input);
     return NextResponse.json({ success: true, created: true, actor_agent_id: actorAgentId, agent }, { status: 201 });
   } catch (error) {
