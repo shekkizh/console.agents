@@ -31,7 +31,6 @@ export async function POST(request: Request) {
     if (existing) return NextResponse.json({ success: true, created: false, actor_agent_id: actorAgentId, agent: existing });
 
     const id = `console-${crypto.randomUUID()}`;
-    await createManagedAgentDefinition(ownerId, id, input);
     const agent = await createAgent(ownerId, id, input);
     return NextResponse.json({ success: true, created: true, actor_agent_id: actorAgentId, agent }, { status: 201 });
   } catch (error) {
