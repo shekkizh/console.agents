@@ -1,3 +1,5 @@
+import type { ArtifactPreviewKind } from "@/lib/artifact-kinds";
+
 export type TaskStatus = "queued" | "running" | "waiting" | "completed" | "failed";
 export type AgentStatus = "ready" | "working" | "offline";
 export type MessageRole = "user" | "agent" | "system";
@@ -56,7 +58,12 @@ export interface Artifact {
   name: string;
   kind: string;
   size?: string;
+  /** External link (e.g. a repo). Internal previewable artifacts are fetched via `previewUrl`. */
   url?: string;
+  /** Set only for artifacts an agent explicitly shared and that this UI knows how to render inline. */
+  previewKind?: ArtifactPreviewKind;
+  previewUrl?: string;
+  mimeType?: string;
 }
 
 export interface Channel {

@@ -122,3 +122,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
   url text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Artifacts an agent explicitly published with the share_artifact tool. Resolvable back to the
+-- sandbox file they came from so the preview route can stream bytes on demand instead of storing
+-- a copy. Additive so this schema can be applied idempotently.
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS agent_id text;
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS sandbox_path text;
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS preview_kind text;
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS mime_type text;
+CREATE UNIQUE INDEX IF NOT EXISTS artifacts_agent_path_idx ON artifacts(owner_id, task_id, agent_id, sandbox_path) WHERE sandbox_path IS NOT NULL;

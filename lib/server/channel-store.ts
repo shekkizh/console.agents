@@ -1,6 +1,7 @@
 import "server-only";
 
 import { neon } from "@neondatabase/serverless";
+import { formatByteSize, RENDERABLE_ARTIFACT_EXTENSIONS, type ArtifactPreviewKind } from "@/lib/artifact-kinds";
 import { orderChannelMessages, resolveDeliveryRecipients } from "@/lib/channel-model";
 import { GENERAL_AGENT_ID, generalAgent } from "@/lib/general-agent";
 import { requireDatabaseUrl } from "@/lib/server/config";
@@ -78,6 +79,13 @@ export function ensurePeerSchema(): Promise<void> {
         UNIQUE (message_id, participant_id)
       )`;
     await sql`CREATE INDEX IF NOT EXISTS message_deliveries_inbox_idx ON message_deliveries(owner_id, channel_id, participant_id, status, available_at, created_at)`;
+    // Artifacts an agent explicitly shared via share_artifact, resolvable back to the sandbox
+    // file they came from so the preview route can stream the bytes on demand.
+    await sql`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS agent_id text`;
+    await sql`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS sandbox_path text`;
+    await sql`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS preview_kind text`;
+    await sql`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS mime_type text`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS artifacts_agent_path_idx ON artifacts(owner_id, task_id, agent_id, sandbox_path) WHERE sandbox_path IS NOT NULL`;
   })().catch((error) => { schemaPromise = undefined; throw error; });
   return schemaPromise;
 }
@@ -87,7 +95,17 @@ type DatabaseTimestamp = string | Date;
 type ChannelRow = { id: string; title: string; summary: string; status: Channel["status"]; repository_url: string | null; created_at: DatabaseTimestamp; updated_at: DatabaseTimestamp };
 type MemberRow = { channel_id: string; participant_id: string; participant_type: ParticipantType; display_name: string; agent_id: string | null; status: ChannelParticipant["status"]; specialty: string | null };
 type MessageRow = { task_id: string; id: string; role: ChannelMessage["role"]; author: string; content: string; steps: RunStep[] | null; created_at: DatabaseTimestamp; author_id: string | null; author_type: ChannelMessage["authorType"] | null; recipient_ids: string[] | null; delivery: MessageDelivery | null; reply_to_id: string | null };
-type ArtifactRow = Artifact & { task_id: string };
+type ArtifactRow = {
+  id: string;
+  task_id: string;
+  name: string;
+  kind: string;
+  size: string | null;
+  url: string | null;
+  agent_id: string | null;
+  preview_kind: ArtifactPreviewKind | null;
+  mime_type: string | null;
+};
 
 function participantFromRow(row: MemberRow): ChannelParticipant {
   return {
@@ -120,6 +138,21 @@ function messageFromRow(row: MessageRow): ChannelMessage {
   };
 }
 
+/** Only expose an internal preview link for artifacts our own preview route can resolve. */
+function artifactFromRow(row: ArtifactRow): Artifact {
+  const previewable = Boolean(row.agent_id && row.preview_kind);
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    size: row.size ?? undefined,
+    url: previewable ? undefined : row.url ?? undefined,
+    previewKind: previewable ? (row.preview_kind as ArtifactPreviewKind) : undefined,
+    previewUrl: previewable ? `/api/artifacts/${row.id}` : undefined,
+    mimeType: row.mime_type ?? undefined,
+  };
+}
+
 export async function listChannels(ownerId: string): Promise<Channel[]> {
   await ensurePeerSchema();
   const sql = database();
@@ -136,7 +169,7 @@ export async function listChannels(ownerId: string): Promise<Channel[]> {
           m.recipient_ids, m.delivery, m.reply_to_id
         FROM messages m JOIN channel_members cm ON cm.channel_id = m.task_id AND cm.owner_id = m.owner_id
         WHERE m.owner_id = ${ownerId} GROUP BY m.id ORDER BY m.created_at, m.id`,
-    sql`SELECT a.task_id, a.id, a.name, a.kind, a.size, a.url
+    sql`SELECT a.task_id, a.id, a.name, a.kind, a.size, a.url, a.agent_id, a.preview_kind, a.mime_type
         FROM artifacts a JOIN channel_members cm ON cm.channel_id = a.task_id AND cm.owner_id = a.owner_id
         WHERE a.owner_id = ${ownerId} GROUP BY a.id ORDER BY a.created_at, a.id`,
   ]);
@@ -151,9 +184,7 @@ export async function listChannels(ownerId: string): Promise<Channel[]> {
       participantIds: participants.map((participant) => participant.id),
       participants,
       messages: orderChannelMessages((messageRows as MessageRow[]).filter((message) => message.task_id === row.id).map(messageFromRow)),
-      artifacts: (artifactRows as ArtifactRow[]).filter((artifact) => artifact.task_id === row.id).map((artifact) => ({
-        id: artifact.id, name: artifact.name, kind: artifact.kind, size: artifact.size, url: artifact.url,
-      })),
+      artifacts: (artifactRows as ArtifactRow[]).filter((artifact) => artifact.task_id === row.id).map(artifactFromRow),
       repositoryUrl: row.repository_url ?? undefined,
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString(),
@@ -325,18 +356,67 @@ export async function channelHasQueuedDeliveries(ownerId: string, channelId: str
   return Boolean(rows[0]?.pending);
 }
 
-export async function recordChannelArtifacts(ownerId: string, channelId: string, steps: RunStep[]): Promise<void> {
-  const fileSteps = steps.filter((step) => step.kind === "file");
-  if (!fileSteps.length) return;
+interface SharedArtifactPayload {
+  ok: true;
+  path: string;
+  title: string;
+  previewKind: ArtifactPreviewKind;
+  mimeType: string;
+  label: string;
+  size: number;
+}
+
+function parseSharedArtifact(detail: string | undefined): SharedArtifactPayload | undefined {
+  if (!detail) return undefined;
+  let payload: unknown;
+  try { payload = JSON.parse(detail); } catch { return undefined; }
+  if (!payload || typeof payload !== "object") return undefined;
+  const candidate = payload as Record<string, unknown>;
+  if (candidate.ok !== true || typeof candidate.path !== "string" || !candidate.path) return undefined;
+  // Only trust extensions/preview kinds this build actually knows how to render.
+  const extension = candidate.path.split(".").pop()?.toLowerCase() ?? "";
+  const rule = RENDERABLE_ARTIFACT_EXTENSIONS[extension];
+  if (!rule) return undefined;
+  return {
+    ok: true,
+    path: candidate.path,
+    title: typeof candidate.title === "string" && candidate.title ? candidate.title.slice(0, 120) : candidate.path.split("/").pop() ?? candidate.path,
+    previewKind: rule.previewKind,
+    mimeType: rule.mimeType,
+    label: rule.label,
+    size: typeof candidate.size === "number" && candidate.size >= 0 ? candidate.size : 0,
+  };
+}
+
+/** Persist artifacts an agent explicitly published via `share_artifact` during this turn. */
+export async function recordChannelArtifacts(ownerId: string, channelId: string, agentId: string, steps: RunStep[]): Promise<void> {
+  const shared = steps
+    .filter((step) => step.kind === "file")
+    .map((step) => parseSharedArtifact(step.detail))
+    .filter((payload): payload is SharedArtifactPayload => Boolean(payload));
+  if (!shared.length) return;
   const sql = database();
-  await sql.transaction(fileSteps.map((step) => {
-    const detail = step.detail ?? "";
-    const url = detail.match(/https?:\/\/[^\s)]+/)?.[0];
-    const path = detail.match(/(?:\/[\w.\-/]+|[\w.-]+\.[a-z0-9]{1,8})/i)?.[0];
-    const name = path?.split("/").filter(Boolean).at(-1) ?? step.label;
-    const extension = name.includes(".") ? name.split(".").at(-1)?.toUpperCase() : undefined;
-    return sql`INSERT INTO artifacts (id, owner_id, task_id, name, kind, url)
-      SELECT ${crypto.randomUUID()}, ${ownerId}, ${channelId}, ${name}, ${extension ? `${extension} file` : "File"}, ${url ?? null}
-      WHERE NOT EXISTS (SELECT 1 FROM artifacts WHERE owner_id = ${ownerId} AND task_id = ${channelId} AND name = ${name})`;
-  }));
+  await sql.transaction(shared.map((artifact) => sql`
+    INSERT INTO artifacts (id, owner_id, task_id, name, kind, size, agent_id, sandbox_path, preview_kind, mime_type)
+    VALUES (${crypto.randomUUID()}, ${ownerId}, ${channelId}, ${artifact.title}, ${artifact.label}, ${formatByteSize(artifact.size)}, ${agentId}, ${artifact.path}, ${artifact.previewKind}, ${artifact.mimeType})
+    ON CONFLICT (owner_id, task_id, agent_id, sandbox_path) WHERE sandbox_path IS NOT NULL
+    DO UPDATE SET name = EXCLUDED.name, kind = EXCLUDED.kind, size = EXCLUDED.size, preview_kind = EXCLUDED.preview_kind, mime_type = EXCLUDED.mime_type`));
+}
+
+/** Look up a shared artifact's sandbox location for the preview route, scoped to its owner. */
+export async function getArtifactForOwner(
+  ownerId: string,
+  artifactId: string,
+): Promise<{ name: string; agentId: string; sandboxPath: string; mimeType: string } | undefined> {
+  const sql = database();
+  const rows = await sql`SELECT name, agent_id, sandbox_path, mime_type FROM artifacts
+      WHERE owner_id = ${ownerId} AND id = ${artifactId} LIMIT 1`;
+  const row = rows[0] as { name: string; agent_id: string | null; sandbox_path: string | null; mime_type: string | null } | undefined;
+  if (!row || !row.agent_id || !row.sandbox_path) return undefined;
+  return {
+    name: row.name,
+    agentId: row.agent_id,
+    sandboxPath: row.sandbox_path,
+    mimeType: row.mime_type || "application/octet-stream",
+  };
 }

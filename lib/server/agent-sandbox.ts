@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash } from "node:crypto";
+import path from "node:path";
 import { Sandbox } from "@vercel/sandbox";
 import {
   AGENT_RUNNER_SOURCE,
@@ -45,6 +46,34 @@ interface RunTaskInput {
 export function agentSandboxName(ownerId: string, agentId: string): string {
   const hash = createHash("sha1").update(`${ownerId}:${agentId}`).digest("hex").slice(0, 40);
   return `console-agent-${hash}`;
+}
+
+/**
+ * Read a file an agent previously shared via `share_artifact` directly out of its persistent
+ * sandbox, for the artifact preview API route. Returns undefined if the sandbox or file is gone
+ * (e.g. the sandbox expired from inactivity) or if the path would escape the agent's workspace.
+ */
+export async function readAgentArtifactFile(
+  ownerId: string,
+  agentId: string,
+  relativePath: string,
+): Promise<Buffer | undefined> {
+  const target = path.posix.resolve(WORKSPACE_DIR, relativePath);
+  if (target !== WORKSPACE_DIR && !target.startsWith(`${WORKSPACE_DIR}/`)) return undefined;
+
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.get({ name: agentSandboxName(ownerId, agentId) });
+  } catch {
+    return undefined;
+  }
+
+  try {
+    const buffer = await sandbox.readFileToBuffer({ path: target });
+    return buffer ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function textContent(value: string) {

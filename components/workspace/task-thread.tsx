@@ -1,6 +1,6 @@
-import { ArrowLeft, ArrowUp, Check, ChevronDown, Code2, ExternalLink, FileText, FolderOpen, Github, Reply, Search, Sparkles, UsersRound, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, Check, ChevronDown, Code2, Download, ExternalLink, FileText, FolderOpen, Github, ImageIcon, Loader2, Reply, Search, Sparkles, UsersRound, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Status } from "@/components/workspace/status";
 import type { Artifact, Channel, ChannelMessage, ChannelParticipant, RunStep } from "@/lib/types";
 
@@ -120,18 +120,63 @@ function PeerMessage({ message, channel, currentUser, peersById, onReply }: {
 
 function ChannelOutputs({ artifacts, repositoryUrl, status }: { artifacts: Artifact[]; repositoryUrl?: string; status: Channel["status"] }) {
   const hasResources = artifacts.length > 0 || Boolean(repositoryUrl);
+  const [previewing, setPreviewing] = useState<Artifact>();
   return <section className={`channel-outputs ${hasResources ? "" : "channel-outputs-empty"}`} aria-label="Channel files and links">
     <header><span><FolderOpen size={16} />Shared files & links</span><small>{artifacts.length} file{artifacts.length === 1 ? "" : "s"}</small></header>
     {hasResources ? <div className="output-grid">
-      {artifacts.map((artifact) => <ArtifactCard artifact={artifact} key={artifact.id} />)}
+      {artifacts.map((artifact) => <ArtifactCard artifact={artifact} onPreview={() => setPreviewing(artifact)} key={artifact.id} />)}
       {repositoryUrl ? <a className="output-card" href={repositoryUrl} target="_blank" rel="noreferrer"><span className="output-icon"><Github size={17} /></span><span><strong>Source repository</strong><small>{repositoryUrl.replace("https://github.com/", "")}</small></span><ExternalLink size={14} /></a> : null}
     </div> : <p>{status === "running" || status === "queued" ? "Files and links shared in the conversation will collect here." : "No files or links were shared in this channel."}</p>}
+    {previewing ? <ArtifactPreview artifact={previewing} onClose={() => setPreviewing(undefined)} /> : null}
   </section>;
 }
 
-function ArtifactCard({ artifact }: { artifact: Artifact }) {
-  const content = <><span className="output-icon"><FileText size={17} /></span><span><strong>{artifact.name}</strong><small>{artifact.kind}{artifact.size ? ` · ${artifact.size}` : ""}</small></span>{artifact.url ? <ExternalLink size={14} /> : null}</>;
+function ArtifactCard({ artifact, onPreview }: { artifact: Artifact; onPreview: () => void }) {
+  const previewable = Boolean(artifact.previewUrl);
+  const icon = artifact.previewKind === "image" ? <ImageIcon size={17} /> : <FileText size={17} />;
+  const content = <><span className="output-icon">{icon}</span><span><strong>{artifact.name}</strong><small>{artifact.kind}{artifact.size ? ` · ${artifact.size}` : ""}</small></span>{artifact.url ? <ExternalLink size={14} /> : null}</>;
+  if (previewable) return <button className="output-card" type="button" onClick={onPreview}>{content}</button>;
   return artifact.url ? <a className="output-card" href={artifact.url} target="_blank" rel="noreferrer">{content}</a> : <div className="output-card">{content}</div>;
+}
+
+function ArtifactPreview({ artifact, onClose }: { artifact: Artifact; onClose: () => void }) {
+  const [text, setText] = useState<string>();
+  const [error, setError] = useState<string>();
+  const loading = artifact.previewKind !== "image" && text === undefined && error === undefined;
+
+  useEffect(() => {
+    if (artifact.previewKind === "image" || !artifact.previewUrl) return;
+    let active = true;
+    fetch(artifact.previewUrl)
+      .then(async (response) => {
+        if (!response.ok) throw new Error((await response.json().catch(() => undefined))?.error ?? "Unable to load this file");
+        return response.text();
+      })
+      .then((value) => { if (active) setText(value); })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Unable to load this file"); });
+    return () => { active = false; };
+  }, [artifact.previewKind, artifact.previewUrl]);
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="artifact-preview" role="dialog" aria-label={`Preview of ${artifact.name}`}>
+      <header>
+        <div className="dialog-title">
+          <span className="dialog-icon">{artifact.previewKind === "image" ? <ImageIcon size={16} /> : <FileText size={16} />}</span>
+          <div><span>{artifact.kind}{artifact.size ? ` · ${artifact.size}` : ""}</span><h2>{artifact.name}</h2></div>
+        </div>
+        <div className="artifact-preview-actions">
+          {artifact.previewUrl ? <a className="icon-button" href={artifact.previewUrl} download={artifact.name} aria-label="Download file"><Download size={16} /></a> : null}
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close preview"><X size={18} /></button>
+        </div>
+      </header>
+      <div className="artifact-preview-body">
+        {artifact.previewKind === "image" && artifact.previewUrl ? <img src={artifact.previewUrl} alt={artifact.name} /> : null}
+        {artifact.previewKind !== "image" && loading ? <div className="artifact-preview-loading"><Loader2 size={16} className="spin" />Loading preview…</div> : null}
+        {artifact.previewKind !== "image" && error ? <p className="artifact-preview-error">{error}</p> : null}
+        {artifact.previewKind !== "image" && !loading && !error && text !== undefined ? <pre className="artifact-preview-text"><code>{text}</code></pre> : null}
+      </div>
+    </section>
+  </div>;
 }
 
 function inlineContent(value: string): ReactNode[] {

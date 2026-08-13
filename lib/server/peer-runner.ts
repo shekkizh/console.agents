@@ -60,7 +60,7 @@ async function activatePeer(ownerId: string, channelId: string, participant: Cha
       recipientIds: [delivery.message.authorId],
       steps: result.steps,
     });
-    await recordChannelArtifacts(ownerId, channelId, result.steps);
+    await recordChannelArtifacts(ownerId, channelId, agent.id, result.steps);
     await completeChannelDelivery(
       ownerId,
       delivery.id,
