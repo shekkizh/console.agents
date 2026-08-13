@@ -4,6 +4,13 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { Sandbox } from "@vercel/sandbox";
 import {
+  AGENT_COMMAND_TIMEOUT_MS,
+  AGENT_SANDBOX_LEASE_MS,
+  AgentSandboxBusyError,
+  SANDBOX_SESSION_TIMEOUT_MS,
+  agentRunInputPath,
+} from "@/lib/agent-sandbox-lifecycle";
+import {
   AGENT_RUNNER_SOURCE,
   RESULT_END,
   RESULT_START,
@@ -14,14 +21,12 @@ import {
   type AgentIdentity,
 } from "@/lib/server/agent-sandbox-assets";
 import { config, requireAiGatewayApiKey } from "@/lib/server/config";
+import { acquireAgentSandboxLease, releaseAgentSandboxLease } from "@/lib/server/agent-sandbox-lease";
 
 const RUNTIME_DIR = "/vercel/sandbox/runtime";
 const WORKSPACE_DIR = "/vercel/sandbox/workspace";
-const RUNNER_PATH = `${RUNTIME_DIR}/runner.mjs`;
-const INPUT_PATH = `${RUNTIME_DIR}/task-input.json`;
 const AI_VERSION = "^7.0.0";
 const ZOD_VERSION = "^3.24.1";
-const SANDBOX_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface SandboxRunResult {
   output: string;
@@ -144,26 +149,31 @@ function parseResult(stdout: string): SandboxRunResult {
 export async function runAgentInSandbox(input: RunTaskInput): Promise<SandboxRunResult> {
   const gatewayKey = requireAiGatewayApiKey();
   const name = agentSandboxName(input.ownerId, input.agent.id);
+  const leaseToken = await acquireAgentSandboxLease(input.ownerId, input.agent.id, AGENT_SANDBOX_LEASE_MS);
+  if (!leaseToken) throw new AgentSandboxBusyError();
+  const inputPath = agentRunInputPath(crypto.randomUUID());
   let created = false;
-
-  const sandbox = await Sandbox.getOrCreate({
-    name,
-    timeout: SANDBOX_TIMEOUT_MS,
-    persistent: true,
-    keepLastSnapshots: { count: 1 },
-    env: { AGENT_MODEL_ID: config.agentModelId },
-    onCreate: async (sbx) => {
-      created = true;
-      await provision(sbx, input.agent);
-    },
-  });
+  let sandbox: Sandbox | undefined;
+  let stoppedCleanly = false;
 
   try {
+    sandbox = await Sandbox.getOrCreate({
+      name,
+      timeout: SANDBOX_SESSION_TIMEOUT_MS,
+      persistent: true,
+      keepLastSnapshots: { count: 1 },
+      env: { AGENT_MODEL_ID: config.agentModelId },
+      onCreate: async (sbx) => {
+        created = true;
+        await provision(sbx, input.agent);
+      },
+    });
+
     if (!created) await refreshRuntime(sandbox);
 
     await sandbox.writeFiles([
       {
-        path: INPUT_PATH,
+        path: inputPath,
         ...textContent(
           JSON.stringify({
             workspaceDir: WORKSPACE_DIR,
@@ -180,10 +190,10 @@ export async function runAgentInSandbox(input: RunTaskInput): Promise<SandboxRun
 
     const command = await sandbox.runCommand({
       cmd: "node",
-      args: ["runner.mjs", INPUT_PATH],
+      args: ["runner.mjs", inputPath],
       cwd: RUNTIME_DIR,
       env: { AGENT_MODEL_ID: config.agentModelId, AI_GATEWAY_API_KEY: gatewayKey },
-      timeoutMs: SANDBOX_TIMEOUT_MS,
+      timeoutMs: AGENT_COMMAND_TIMEOUT_MS,
     });
 
     const stdout = await command.stdout();
@@ -193,7 +203,20 @@ export async function runAgentInSandbox(input: RunTaskInput): Promise<SandboxRun
     }
     return result;
   } finally {
-    // Stop the session so the filesystem (the agent's durable self-edits) is snapshotted.
-    await sandbox.stop().catch(() => {});
+    if (sandbox) {
+      try {
+        // Keep the lease until snapshotting finishes so another invocation cannot hit STOPPING.
+        await sandbox.stop();
+        stoppedCleanly = true;
+      } catch {
+        // Retain the lease until its TTL when shutdown cannot be confirmed. The sandbox session
+        // expires before the lease, preventing another invocation from entering a closing stream.
+      }
+    } else {
+      stoppedCleanly = true;
+    }
+    if (stoppedCleanly) {
+      await releaseAgentSandboxLease(input.ownerId, input.agent.id, leaseToken).catch(() => {});
+    }
   }
 }

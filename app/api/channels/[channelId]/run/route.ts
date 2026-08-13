@@ -3,7 +3,7 @@ import { requireOwner } from "@/lib/server/auth";
 import { runPeerChannel } from "@/lib/server/peer-runner";
 import { getWorkspace } from "@/lib/server/store";
 
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 /** Resume a persisted channel inbox after a bounded drain or interrupted request. */
 export async function GET(_request: Request, context: { params: Promise<{ channelId: string }> }) {

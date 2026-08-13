@@ -90,6 +90,17 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
 CREATE INDEX IF NOT EXISTS message_deliveries_inbox_idx
   ON message_deliveries(owner_id, channel_id, participant_id, status, available_at, created_at);
 
+-- A named persistent sandbox is shared by an agent across every channel. This lease prevents
+-- separate function invocations from writing to or stopping the same sandbox session concurrently.
+CREATE TABLE IF NOT EXISTS agent_sandbox_leases (
+  owner_id text NOT NULL,
+  agent_id text NOT NULL,
+  lease_token uuid NOT NULL,
+  lease_until timestamptz NOT NULL,
+  acquired_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (owner_id, agent_id)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id text NOT NULL,

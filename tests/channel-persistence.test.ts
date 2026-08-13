@@ -40,6 +40,15 @@ test("agent inbox deliveries are persisted and claimable in FIFO order", () => {
   );
 });
 
+test("persistent agent sandboxes have a cross-invocation lease", () => {
+  const leases = tableDefinition("agent_sandbox_leases");
+  assert.match(leases, /owner_id text NOT NULL/);
+  assert.match(leases, /agent_id text NOT NULL/);
+  assert.match(leases, /lease_token uuid NOT NULL/);
+  assert.match(leases, /lease_until timestamptz NOT NULL/);
+  assert.match(leases, /PRIMARY KEY \(owner_id, agent_id\)/);
+});
+
 test("artifacts remain owned by the same durable channel transcript", () => {
   const artifacts = tableDefinition("artifacts");
   assert.match(artifacts, /task_id uuid NOT NULL REFERENCES tasks\(id\) ON DELETE CASCADE/);

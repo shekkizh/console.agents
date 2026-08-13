@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isAgentSandboxBusyError } from "@/lib/agent-sandbox-lifecycle";
 import { runAgentTurn } from "@/lib/server/agent-runtime";
 import {
   channelHasQueuedDeliveries,
@@ -69,6 +70,11 @@ async function activatePeer(ownerId: string, channelId: string, participant: Cha
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to run channel peer";
+    if (isAgentSandboxBusyError(error)) {
+      await updateChannelMemberRun(ownerId, channelId, participant.id, { status: "ready" });
+      await completeChannelDelivery(ownerId, delivery.id, "queued");
+      return false;
+    }
     if (message.includes("429") || /rate.?limit/i.test(message)) {
       await updateChannelMemberRun(ownerId, channelId, participant.id, { status: "offline" });
       await completeChannelDelivery(ownerId, delivery.id, "queued");

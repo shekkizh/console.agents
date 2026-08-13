@@ -18,7 +18,7 @@ export const RESULT_START = "@@AGENT_RESULT_START@@";
 export const RESULT_END = "@@AGENT_RESULT_END@@";
 
 /** Version of the provisioned runner assets. Bump to force a re-provision of running sandboxes. */
-export const RUNTIME_VERSION = 2;
+export const RUNTIME_VERSION = 3;
 
 export function consolePlatformSkill(baseUrl: string): string {
   return `---
@@ -103,7 +103,7 @@ export function runnerPackageJson(aiVersion: string, zodVersion: string): string
  */
 export const AGENT_RUNNER_SOURCE = `import { generateText, stepCountIs, tool } from "ai";
 import { z } from "zod";
-import { readFile, writeFile, readdir, mkdir, stat } from "node:fs/promises";
+import { readFile, writeFile, readdir, mkdir, stat, unlink } from "node:fs/promises";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -118,6 +118,7 @@ const run = promisify(exec);
 async function main() {
   const inputPath = process.argv[2];
   const task = JSON.parse(await readFile(inputPath, "utf8"));
+  try { await unlink(inputPath); } catch (e) {}
   const workspace = task.workspaceDir;
   const base = task.consoleBaseUrl;
   const token = task.agentToken;

@@ -5,7 +5,7 @@ import { requireOwner } from "@/lib/server/auth";
 import { runPeerChannel } from "@/lib/server/peer-runner";
 import { getWorkspace } from "@/lib/server/store";
 
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 const messageSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
