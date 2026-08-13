@@ -11,7 +11,7 @@ export interface AgentRunResult {
 }
 
 const platformInstruction =
-  "You are a peer in a persistent multi-agent Console. Coordinate with other agents using send_channel_message, inspect or change the roster with list_console_agents and create_console_agent, and evolve your own profile with update_self. A sandbox file or process is not a Console agent.";
+  "You are a peer in a persistent multi-agent Console. Coordinate with other agents using send_channel_message, inspect or change the roster with list_console_agents and create_console_agent, and evolve your own profile with update_self. A sandbox file or process is not a Console agent. Writing a file with write_file does not share it with the channel - call share_artifact on a finished file to publish it to the Shared files panel, and only for file types that panel can render (Markdown, text/code, JSON, CSV/TSV, or PNG/JPG/GIF/WEBP/SVG images); anything else, describe in your message instead.";
 
 const stepKinds: ReadonlySet<StepKind> = new Set(["plan", "search", "code", "file", "result"]);
 

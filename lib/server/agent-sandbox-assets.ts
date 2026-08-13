@@ -1,5 +1,11 @@
 import "server-only";
 
+import {
+  MAX_IMAGE_ARTIFACT_BYTES,
+  MAX_TEXT_ARTIFACT_BYTES,
+  RENDERABLE_ARTIFACT_EXTENSIONS,
+} from "@/lib/artifact-kinds";
+
 export interface AgentIdentity {
   id: string;
   name: string;
@@ -12,7 +18,7 @@ export const RESULT_START = "@@AGENT_RESULT_START@@";
 export const RESULT_END = "@@AGENT_RESULT_END@@";
 
 /** Version of the provisioned runner assets. Bump to force a re-provision of running sandboxes. */
-export const RUNTIME_VERSION = 1;
+export const RUNTIME_VERSION = 2;
 
 export function consolePlatformSkill(baseUrl: string): string {
   return `---
@@ -47,6 +53,17 @@ You may maintain your own files with \`read_file\`, \`write_file\`, and \`list_f
 - \`.agents/AGENTS.md\` for evolving operating instructions (loaded into your system prompt each run).
 - \`.agents/skills/<skill-name>/SKILL.md\` for reusable skills.
 - \`memory/\` for long-term notes and state.
+
+## Sharing files with the channel
+
+Console's "Shared files & links" panel can only render a fixed set of file types inline: Markdown,
+plain text/code, JSON, CSV/TSV, and PNG/JPG/GIF/WEBP/SVG images (text/code files up to 256 KB,
+images up to 5 MB). Writing a file with \`write_file\` does NOT share it — call \`share_artifact\`
+with the workspace-relative path once the file exists to publish it to the channel. If you have a
+deliverable in another format (PDF, zip, binary, spreadsheet, etc.), summarize or convert the
+relevant parts into one of the renderable formats above before sharing, or describe it in your
+message instead of calling \`share_artifact\` — a rejected/unrenderable share will not appear to
+peers.
 `;
 }
 
@@ -86,13 +103,16 @@ export function runnerPackageJson(aiVersion: string, zodVersion: string): string
  */
 export const AGENT_RUNNER_SOURCE = `import { generateText, stepCountIs, tool } from "ai";
 import { z } from "zod";
-import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
+import { readFile, writeFile, readdir, mkdir, stat } from "node:fs/promises";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 
 const RESULT_START = ${JSON.stringify(RESULT_START)};
 const RESULT_END = ${JSON.stringify(RESULT_END)};
+const RENDERABLE_ARTIFACT_EXTENSIONS = ${JSON.stringify(RENDERABLE_ARTIFACT_EXTENSIONS)};
+const MAX_TEXT_ARTIFACT_BYTES = ${JSON.stringify(MAX_TEXT_ARTIFACT_BYTES)};
+const MAX_IMAGE_ARTIFACT_BYTES = ${JSON.stringify(MAX_IMAGE_ARTIFACT_BYTES)};
 const run = promisify(exec);
 
 async function main() {
@@ -160,6 +180,35 @@ async function main() {
         } catch (e) { return { path: args.path || ".", error: String((e && e.message) || e) }; }
       },
     }),
+    share_artifact: tool({
+      description: "Publish a file already in your workspace to the channel's Shared files panel, where peers can preview it inline. Only Markdown, plain text/code, JSON, CSV/TSV, and PNG/JPG/GIF/WEBP/SVG images can be rendered there (text/code up to 256KB, images up to 5MB) - do not call this for any other file type; summarize or convert it instead.",
+      inputSchema: z.object({ path: z.string(), title: z.string().optional() }),
+      execute: async (args) => {
+        try {
+          const target = resolveInWorkspace(args.path);
+          const stats = await stat(target);
+          if (!stats.isFile()) return { ok: false, error: "That path is not a file" };
+          const extension = path.extname(args.path).slice(1).toLowerCase();
+          const rule = RENDERABLE_ARTIFACT_EXTENSIONS[extension];
+          if (!rule) {
+            return { ok: false, error: "Unsupported file type for the Shared files panel. Only Markdown, text/code, JSON, CSV/TSV, and PNG/JPG/GIF/WEBP/SVG images can be previewed - convert or summarize this file instead." };
+          }
+          const maxBytes = rule.previewKind === "image" ? MAX_IMAGE_ARTIFACT_BYTES : MAX_TEXT_ARTIFACT_BYTES;
+          if (stats.size > maxBytes) {
+            return { ok: false, error: "File is too large to preview (limit " + Math.round(maxBytes / 1024) + "KB for this type)" };
+          }
+          return {
+            ok: true,
+            path: args.path,
+            title: (args.title || path.basename(args.path)).slice(0, 120),
+            previewKind: rule.previewKind,
+            mimeType: rule.mimeType,
+            label: rule.label,
+            size: stats.size,
+          };
+        } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+      },
+    }),
     run_shell: tool({
       description: "Run a shell command inside your workspace sandbox and capture its output.",
       inputSchema: z.object({ command: z.string() }),
@@ -212,16 +261,23 @@ async function main() {
 
   function kindForTool(name) {
     if (name === "run_shell") return "code";
-    if (name === "read_file" || name === "write_file" || name === "list_files") return "file";
+    if (name === "read_file" || name === "write_file" || name === "list_files") return "code";
+    if (name === "share_artifact") return "file";
     return "result";
   }
 
   const steps = [];
   for (const step of result.steps || []) {
+    const resultsByCallId = new Map((step.toolResults || []).map((toolResult) => [toolResult.toolCallId, toolResult]));
     for (const call of step.toolCalls || []) {
       let detail = "";
-      try { detail = JSON.stringify(call.input); } catch (e) {}
-      steps.push({ kind: kindForTool(call.toolName), label: String(call.toolName).split("_").join(" "), detail: detail.slice(0, 240) });
+      if (call.toolName === "share_artifact") {
+        const toolResult = resultsByCallId.get(call.toolCallId);
+        try { detail = JSON.stringify(toolResult ? toolResult.output : { ok: false }); } catch (e) {}
+      } else {
+        try { detail = JSON.stringify(call.input); } catch (e) {}
+      }
+      steps.push({ kind: kindForTool(call.toolName), label: String(call.toolName).split("_").join(" "), detail: detail.slice(0, 400) });
     }
   }
 
