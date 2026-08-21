@@ -104,6 +104,18 @@ WHERE e.conversation_id IS NULL
     WHERE c.id = 'conversation-' || substr(md5(e.owner_id || ':' || e.agent_id), 1, 24)
   );
 
+UPDATE conversations c
+SET title = COALESCE((
+  SELECT left(regexp_replace(e.payload->>'message', '[[:space:]]+', ' ', 'g'), 64)
+  FROM agent_events e
+  WHERE e.owner_id = c.owner_id
+    AND e.conversation_id = c.id
+    AND e.event_type = 'message.user'
+  ORDER BY e.created_at ASC
+  LIMIT 1
+), c.title)
+WHERE c.title = 'New conversation';
+
 CREATE INDEX IF NOT EXISTS agent_events_agent_created_idx
   ON agent_events(owner_id, agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS agent_events_conversation_created_idx
