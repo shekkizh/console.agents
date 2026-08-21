@@ -1,5 +1,3 @@
-import "server-only";
-
 import { neon } from "@neondatabase/serverless";
 import type { CapturedArtifact } from "@/lib/server/artifact-capture";
 import { requireDatabaseUrl } from "@/lib/server/config";
