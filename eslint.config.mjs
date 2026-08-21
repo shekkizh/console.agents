@@ -1,9 +1,9 @@
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
-import nextTypeScript from "eslint-config-next/typescript";
+import nextTs from "eslint-config-next/typescript";
 
 export default defineConfig([
   ...nextVitals,
-  ...nextTypeScript,
-  globalIgnores([".next/**", "docs/**", "next-env.d.ts"]),
+  ...nextTs,
+  globalIgnores([".next/**", ".eve/**", ".output/**", ".vercel/**", "next-env.d.ts"]),
 ]);

@@ -1,32 +1,51 @@
 {
-  "name": "console",
+  "name": "console-agents",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "dev": "next dev",
+    "dev": "WORKFLOW_LOCAL_BODY_TIMEOUT_MS=900000 next dev",
     "build": "next build",
-    "test": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test tests/**/*.test.ts",
+    "db:migrate": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --experimental-strip-types scripts/migrate.ts",
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test 'tests/**/*.test.ts'",
+    "test:integration": "npm run db:migrate && RUN_DATABASE_TESTS=1 node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx --test tests/integration/**/*.test.ts",
+    "test:e2e": "node --env-file-if-exists=.env --env-file-if-exists=.env.local ./node_modules/@playwright/test/cli.js test",
+    "test:all": "npm test && npm run test:integration && npm run test:e2e"
   },
   "dependencies": {
+    "@clerk/backend": "^2.33.6",
     "@clerk/nextjs": "^6.31.9",
     "@neondatabase/serverless": "^1.0.2",
-    "@vercel/sandbox": "^3.0.0",
-    "ai": "^7.0.64",
-    "lucide-react": "^0.468.0",
+    "@shikijs/core": "^4.3.1",
+    "@shikijs/engine-javascript": "^4.3.1",
+    "@shikijs/engine-oniguruma": "^4.3.1",
+    "@streamdown/cjk": "^1.0.3",
+    "@streamdown/code": "^1.1.1",
+    "@streamdown/math": "^1.0.2",
+    "@streamdown/mermaid": "^1.0.2",
+    "eve": "^0.40.0",
     "next": "^16.2.12",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "shiki": "^4.3.1",
+    "streamdown": "^2.5.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.6",
     "@types/react-dom": "^19.0.2",
     "eslint": "^9.17.0",
     "eslint-config-next": "^16.2.12",
+    "microsandbox": "^0.5.10",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.2"
   },
   "overrides": {

@@ -1,17 +1,18 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
+import { config } from "@/lib/server/config";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Console",
-  description: "A private workspace for you and your managed agents.",
+  title: "Agent Console",
+  description: "Private persistent agents",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  const body = <body>{children}</body>;
-  return (
+  const document = (
     <html lang="en">
-      {process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY ? <ClerkProvider>{body}</ClerkProvider> : body}
+      <body>{children}</body>
     </html>
   );
+  return config.e2eTestMode ? document : <ClerkProvider>{document}</ClerkProvider>;
 }

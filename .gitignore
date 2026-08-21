@@ -1,5 +1,8 @@
 node_modules
 .next
+.eve
+.output
+output/playwright
 .vercel
 .env
 .env.local
