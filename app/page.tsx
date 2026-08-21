@@ -1,11 +1,14 @@
-import { Workspace } from "@/components/workspace/workspace";
+import { AgentConsole } from "@/components/agent-console";
 import { requireOwner } from "@/lib/server/auth";
-import { getWorkspace } from "@/lib/server/store";
+import { listAgents } from "@/lib/server/agent-store";
+import { createConversation, listConversations } from "@/lib/server/conversation-store";
 
-export const dynamic = "force-dynamic";
-
-export default async function HomePage() {
+export default async function Home() {
   const ownerId = await requireOwner();
-  const snapshot = await getWorkspace(ownerId);
-  return <Workspace initialSnapshot={snapshot} />;
+  const agents = await listAgents(ownerId);
+  let conversations = await listConversations(ownerId);
+  if (conversations.length === 0 && agents[0]) {
+    conversations = [await createConversation(ownerId, agents[0].id)];
+  }
+  return <AgentConsole initialAgents={agents} initialConversations={conversations} />;
 }

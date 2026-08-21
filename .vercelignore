@@ -1,6 +1,8 @@
-docs/
-node_modules/
-.next/
+.git
+.next
+.output
+.eve/builds
+node_modules
+npm-debug.log*
 .env
 .env.local
-.git/
