@@ -40,5 +40,6 @@ export async function runE2EFakeFxTurn(input: {
     steps: 1,
     toolCalls: [],
     controlPlaneChanges: [],
+    artifacts: [],
   };
 }

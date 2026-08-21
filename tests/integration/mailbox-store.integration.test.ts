@@ -154,7 +154,13 @@ test(
       transcript.filter((message) => message.role === "user").map((message) => message.text),
       ["alpha", "beta"],
     );
+    await sql.query(
+      `UPDATE conversations SET title = 'New conversation'
+       WHERE owner_id = $1 AND id = $2`,
+      [ownerId, conversation.id],
+    );
     const persisted = await getConversation(ownerId, conversation.id);
+    assert.equal(persisted?.title, "alpha");
     assert.equal(persisted?.eveSessionId, "current-session");
     assert.notEqual(persisted?.status, "working");
   },

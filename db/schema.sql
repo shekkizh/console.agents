@@ -104,10 +104,42 @@ WHERE e.conversation_id IS NULL
     WHERE c.id = 'conversation-' || substr(md5(e.owner_id || ':' || e.agent_id), 1, 24)
   );
 
+UPDATE conversations c
+SET title = COALESCE((
+  SELECT left(regexp_replace(e.payload->>'message', '[[:space:]]+', ' ', 'g'), 64)
+  FROM agent_events e
+  WHERE e.owner_id = c.owner_id
+    AND e.conversation_id = c.id
+    AND e.event_type = 'message.user'
+  ORDER BY e.created_at ASC
+  LIMIT 1
+), c.title)
+WHERE c.title = 'New conversation';
+
 CREATE INDEX IF NOT EXISTS agent_events_agent_created_idx
   ON agent_events(owner_id, agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS agent_events_conversation_created_idx
   ON agent_events(owner_id, conversation_id, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS agent_artifacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id text NOT NULL,
+  agent_id text NOT NULL,
+  conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  request_id text NOT NULL,
+  sandbox_path text NOT NULL,
+  filename text NOT NULL,
+  title text NOT NULL,
+  media_type text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('image', 'pdf', 'text')),
+  size_bytes integer NOT NULL CHECK (size_bytes >= 0),
+  content bytea NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, conversation_id, request_id, sandbox_path)
+);
+
+CREATE INDEX IF NOT EXISTS agent_artifacts_owner_conversation_idx
+  ON agent_artifacts(owner_id, conversation_id, created_at ASC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS agent_events_unique_user_request_idx
   ON agent_events(owner_id, conversation_id, (payload->>'requestId'))

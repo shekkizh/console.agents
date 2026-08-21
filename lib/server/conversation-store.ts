@@ -25,7 +25,17 @@ function database() {
 }
 
 const selectColumns = `
-  c.id, c.agent_id, a.name AS agent_name, c.title, c.eve_session_id,
+  c.id, c.agent_id, a.name AS agent_name,
+  CASE WHEN c.title = 'New conversation' THEN COALESCE((
+    SELECT left(regexp_replace(event.payload->>'message', '[[:space:]]+', ' ', 'g'), 64)
+    FROM agent_events event
+    WHERE event.owner_id = c.owner_id
+      AND event.conversation_id = c.id
+      AND event.event_type = 'message.user'
+    ORDER BY event.created_at ASC
+    LIMIT 1
+  ), c.title) ELSE c.title END AS title,
+  c.eve_session_id,
   c.runtime_version, c.status, c.created_at, c.updated_at
 `;
 

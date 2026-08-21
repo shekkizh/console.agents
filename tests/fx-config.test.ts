@@ -63,6 +63,12 @@ test("renders the sandbox boundary into fx instructions", () => {
   assert.match(instructions, /full control of this sandbox/);
   assert.match(instructions, /never claim access outside it/i);
   assert.match(instructions, /Prefer flexible model judgment and reusable skills/);
+  assert.match(instructions, /\.console\/artifacts\.json/);
+  assert.match(instructions, /For office documents, create a PDF preview/);
+  const manifestExample = /```json\n([^\n]+)\n```/.exec(instructions)?.[1];
+  assert.deepEqual(JSON.parse(manifestExample ?? "null"), {
+    files: [{ path: ".console/previews/example.png", title: "Optional preview title" }],
+  });
   assert.match(instructions, /console-platform/);
   assert.doesNotMatch(instructions, /sk_[A-Za-z0-9]/);
 });

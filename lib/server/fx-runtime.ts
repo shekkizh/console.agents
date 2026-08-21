@@ -23,6 +23,12 @@ import {
   usesStaticFxNetworkPolicy,
 } from "@/lib/server/fx-network-policy";
 import type { AgentProfile, FxAskResult } from "@/lib/types";
+import {
+  ARTIFACT_MANIFEST_PATH,
+  EMPTY_ARTIFACT_MANIFEST,
+  collectPreviewArtifacts,
+  type CapturedArtifact,
+} from "@/lib/server/artifact-capture";
 
 export const FX_BINARY_PATH = "/workspace/.console/bin/fx";
 const FX_SESSION_PATH = ".console/fx-session-id";
@@ -247,6 +253,7 @@ async function applyControlRequests(input: {
 
 export interface FxTurnOutcome extends FxAskResult {
   controlPlaneChanges: Array<Record<string, unknown>>;
+  artifacts: CapturedArtifact[];
 }
 
 export async function runFxTurn(input: {
@@ -267,7 +274,13 @@ export async function runFxTurn(input: {
     storedSession = null;
   }
   const previousSession = validSessionId(storedSession);
-  await input.sandbox.writeTextFile({ path: ".console/prompt.txt", content: input.prompt });
+  await Promise.all([
+    input.sandbox.writeTextFile({ path: ".console/prompt.txt", content: input.prompt }),
+    input.sandbox.writeTextFile({
+      path: ARTIFACT_MANIFEST_PATH,
+      content: EMPTY_ARTIFACT_MANIFEST,
+    }),
+  ]);
 
   const mode = input.agent.fxConfig.permissionMode === "auto" ? "--auto" : "--yolo";
   const resume = previousSession ? '--resume-id "$FX_RESUME_ID"' : "";
@@ -296,7 +309,8 @@ export async function runFxTurn(input: {
     if (control.currentAgent.configVersion !== input.agent.configVersion) {
       await syncFxAgentConfig(input.sandbox, control.currentAgent, await listAgents(input.ownerId));
     }
-    return { ...result, controlPlaneChanges: control.applied };
+    const artifacts = await collectPreviewArtifacts(input.sandbox);
+    return { ...result, controlPlaneChanges: control.applied, artifacts };
   } finally {
     try {
       await input.sandbox.writeTextFile({ path: ".console/prompt.txt", content: "" });

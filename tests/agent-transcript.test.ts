@@ -39,3 +39,39 @@ test("keeps legacy events without request IDs readable", () => {
   ]);
   assert.equal(messages[0]?.requestId, "legacy");
 });
+
+test("projects validated inline preview metadata", () => {
+  const messages = projectAgentTranscript([
+    {
+      id: "assistant",
+      event_type: "message.assistant",
+      payload: {
+        message: "Here is the chart.",
+        requestId: "request",
+        artifacts: [
+          {
+            id: "artifact-id",
+            name: "chart.png",
+            title: "Revenue chart",
+            mediaType: "image/png",
+            kind: "image",
+            size: 2048,
+          },
+          { id: "invalid", kind: "executable" },
+        ],
+      },
+      created_at: at,
+    },
+  ]);
+
+  assert.deepEqual(messages[0]?.artifacts, [
+    {
+      id: "artifact-id",
+      name: "chart.png",
+      title: "Revenue chart",
+      mediaType: "image/png",
+      kind: "image",
+      size: 2048,
+    },
+  ]);
+});
