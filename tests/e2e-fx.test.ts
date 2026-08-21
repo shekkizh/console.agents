@@ -8,7 +8,7 @@ const agent = {
   name: "Test",
   specialty: "Tests",
   instructions: "Run deterministic tests.",
-  fxConfig: { model: "test/model", maxSteps: 1, permissionMode: "yolo", skills: [], mcpServers: {} },
+  fxConfig: { model: "test/model", maxSteps: 1, networkAccess: "full", networkAllowlist: [], skills: [], mcpServers: {} },
   configVersion: 1,
   eveSessionId: null,
   createdByAgentId: null,

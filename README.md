@@ -21,7 +21,7 @@ workspace · tools · skills · sessions · subagents · agent proposals
 
 Each conversation owns a durable event mailbox, one Eve wake-up session, a persistent sandbox, and one resumable fx session. Sending never waits for the current fx activation: the channel records the message first and queues a wake-up. The single worker drains messages in arrival order and runs one distinct fx activation per message. Eve may coalesce wake-ups, but it cannot merge or lose mailbox messages. Tool-result events notify the UI as each reply is committed, so no browser polling or open tab is required for execution.
 
-The execution engine has unrestricted filesystem and process access inside the sandbox. It receives the AI Gateway key only in the environment of an active fx process; Clerk, Neon, and control-plane credentials remain outside the sandbox. Egress is limited to AI Gateway, the pinned runtime release host, and public development registries during active turns.
+The execution engine has unrestricted filesystem and process access inside the sandbox. It receives the AI Gateway key only in the environment of an active fx process; Clerk, Neon, and control-plane credentials remain outside the sandbox. Each agent can use full network access, no tool egress, or a domain allowlist; the model connection remains available in every mode.
 
 To create another persistent agent or update itself, the engine writes a bounded request to `.console/control-plane.json`. After the turn, trusted Eve code validates at most five requests, applies them to Neon, records an audit event, and clears the outbox. Newly created agents appear in the UI after the roster refresh.
 

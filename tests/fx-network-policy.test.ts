@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fxNetworkAllowlistSchema } from "../lib/agent-capabilities.ts";
 import {
   activeFxNetworkPolicy,
   idleFxNetworkPolicy,
-  usesStaticFxNetworkPolicy,
+  stopsFxSandboxAfterTurn,
 } from "../lib/server/fx-network-policy.ts";
 
 function allowMap(policy: ReturnType<typeof idleFxNetworkPolicy>) {
@@ -17,13 +18,31 @@ test("keeps model and development egress closed while the sandbox is idle", () =
   assert.deepEqual(Object.keys(allow), ["github.com", "*.githubusercontent.com"]);
 });
 
-test("allows the AI Gateway only while an agent turn is active", () => {
-  const policy = activeFxNetworkPolicy();
-  const allow = allowMap(policy);
-  assert.deepEqual(allow["ai-gateway.vercel.sh"], []);
+test("allows unrestricted egress in full mode", () => {
+  assert.equal(activeFxNetworkPolicy("full"), "allow-all");
 });
 
-test("uses static policy only on the stoppable Microsandbox backend", () => {
-  assert.equal(usesStaticFxNetworkPolicy(undefined), true);
-  assert.equal(usesStaticFxNetworkPolicy("1"), false);
+test("keeps only the model connection in none mode", () => {
+  const policy = activeFxNetworkPolicy("none");
+  const allow = allowMap(policy);
+  assert.deepEqual(Object.keys(allow), ["ai-gateway.vercel.sh"]);
+});
+
+test("adds configured domains in allowlist mode", () => {
+  const policy = activeFxNetworkPolicy("allowlist", ["github.com", "*.npmjs.org"]);
+  const allow = allowMap(policy);
+  assert.deepEqual(Object.keys(allow), ["ai-gateway.vercel.sh", "github.com", "*.npmjs.org"]);
+});
+
+test("normalizes and validates allowlist domains", () => {
+  assert.deepEqual(
+    fxNetworkAllowlistSchema.parse(["GitHub.com", "github.com", "*.npmjs.org"]),
+    ["github.com", "*.npmjs.org"],
+  );
+  assert.throws(() => fxNetworkAllowlistSchema.parse(["https://github.com"]));
+});
+
+test("stops compute after local Microsandbox turns", () => {
+  assert.equal(stopsFxSandboxAfterTurn(undefined), true);
+  assert.equal(stopsFxSandboxAfterTurn("1"), false);
 });

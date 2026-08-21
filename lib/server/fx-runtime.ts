@@ -20,7 +20,7 @@ import { config, requireAiGatewayApiKey } from "@/lib/server/config";
 import {
   activeFxNetworkPolicy,
   idleFxNetworkPolicy,
-  usesStaticFxNetworkPolicy,
+  stopsFxSandboxAfterTurn,
 } from "@/lib/server/fx-network-policy";
 import type { AgentProfile, FxAskResult } from "@/lib/types";
 import {
@@ -43,7 +43,6 @@ const controlRequestSchema = z.discriminatedUnion("type", [
     instructions: z.string().trim().min(8).max(20_000),
     model: z.string().trim().min(3).max(200).optional(),
     maxSteps: z.number().int().min(1).max(128).optional(),
-    permissionMode: z.enum(["auto", "yolo"]).optional(),
     ...optionalFxCapabilitiesSchema,
   }),
   z.object({
@@ -54,7 +53,6 @@ const controlRequestSchema = z.discriminatedUnion("type", [
     instructions: z.string().trim().min(8).max(20_000).optional(),
     model: z.string().trim().min(3).max(200).optional(),
     maxSteps: z.number().int().min(1).max(128).optional(),
-    permissionMode: z.enum(["auto", "yolo"]).optional(),
     ...optionalFxCapabilitiesSchema,
   }),
 ]);
@@ -116,7 +114,7 @@ To create a persistent Console agent or update your own registered configuration
 }
 \`\`\`
 
-The other request type is \`update-self\`; it accepts \`requestId\` and any agent setting, including \`skills\` and \`mcpServers\`. At most five requests are accepted per turn. Agent Console validates and applies them after your turn, then clears the file. Use \`.console/agents.json\` to inspect the current roster. Creating only a local process or subagent does not register a persistent Console agent.
+The other request type is \`update-self\`; it accepts \`requestId\` and profile or runtime settings such as \`model\`, \`maxSteps\`, \`skills\`, and \`mcpServers\`. Network access can only be changed by the user in Agent settings. At most five requests are accepted per turn. Agent Console validates and applies them after your turn, then clears the file. Use \`.console/agents.json\` to inspect the current roster. Creating only a local process or subagent does not register a persistent Console agent.
 `;
 }
 
@@ -215,7 +213,6 @@ async function applyControlRequests(input: {
           instructions: request.instructions,
           model: request.model,
           maxSteps: request.maxSteps,
-          permissionMode: request.permissionMode,
           skills: request.skills,
           mcpServers: request.mcpServers,
           createdByAgentId: input.agent.id,
@@ -236,7 +233,6 @@ async function applyControlRequests(input: {
       instructions: request.instructions,
       model: request.model,
       maxSteps: request.maxSteps,
-      permissionMode: request.permissionMode,
       skills: request.skills,
       mcpServers: request.mcpServers,
     };
@@ -282,15 +278,17 @@ export async function runFxTurn(input: {
     }),
   ]);
 
-  const mode = input.agent.fxConfig.permissionMode === "auto" ? "--auto" : "--yolo";
   const resume = previousSession ? '--resume-id "$FX_RESUME_ID"' : "";
-  const command = `cd /workspace && prompt="$(cat .console/prompt.txt)" && exec ${FX_BINARY_PATH} ask --json ${mode} ${resume} -- "$prompt"`;
-  const staticNetworkPolicy = usesStaticFxNetworkPolicy();
+  const command = `cd /workspace && prompt="$(cat .console/prompt.txt)" && exec ${FX_BINARY_PATH} ask --json --yolo ${resume} -- "$prompt"`;
+  const stopAfterTurn = stopsFxSandboxAfterTurn();
 
   try {
-    if (!staticNetworkPolicy) {
-      await input.sandbox.setNetworkPolicy(activeFxNetworkPolicy());
-    }
+    await input.sandbox.setNetworkPolicy(
+      activeFxNetworkPolicy(
+        input.agent.fxConfig.networkAccess,
+        input.agent.fxConfig.networkAllowlist,
+      ),
+    );
     const run = await input.sandbox.run({
       command,
       abortSignal: input.abortSignal,
@@ -318,9 +316,8 @@ export async function runFxTurn(input: {
       // The sandbox may already be gone after cancellation.
     }
 
-    if (staticNetworkPolicy) {
-      // Microsandbox 0.5.x can crash while replacing a live VM to change policy.
-      // Stop compute after every turn instead; the durable filesystem is preserved.
+    if (stopAfterTurn) {
+      // Local compute stops after every turn; the durable filesystem and policy are preserved.
       try {
         await input.sandbox.stop();
       } catch {

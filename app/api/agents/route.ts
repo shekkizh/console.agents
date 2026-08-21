@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { optionalFxCapabilitiesSchema } from "@/lib/agent-capabilities";
+import { optionalFxCapabilitiesSchema, optionalFxNetworkSchema } from "@/lib/agent-capabilities";
 import { requireOwner } from "@/lib/server/auth";
 import { createAgent, findAgentByName, listAgents } from "@/lib/server/agent-store";
 
@@ -10,7 +10,7 @@ const createSchema = z.object({
   instructions: z.string().trim().min(8).max(20_000),
   model: z.string().trim().min(3).max(200).optional(),
   maxSteps: z.number().int().min(1).max(128).optional(),
-  permissionMode: z.enum(["auto", "yolo"]).optional(),
+  ...optionalFxNetworkSchema,
   ...optionalFxCapabilitiesSchema,
 });
 

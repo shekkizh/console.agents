@@ -19,7 +19,8 @@ const agent: AgentProfile = {
   fxConfig: {
     model: "zai/glm-5.2",
     maxSteps: 32,
-    permissionMode: "yolo",
+    networkAccess: "full",
+    networkAllowlist: [],
     skills: [],
     mcpServers: {},
   },
