@@ -2,6 +2,21 @@ import { z } from "zod";
 
 const envName = z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "Use an environment variable name");
 const serverName = z.string().regex(/^[a-zA-Z0-9_-]{1,60}$/, "Use letters, numbers, _ or -");
+const networkDomain = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(253)
+  .regex(
+    /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/,
+    "Use a domain such as example.com or *.example.com",
+  );
+
+export const fxNetworkAccessSchema = z.enum(["full", "none", "allowlist"]);
+export const fxNetworkAllowlistSchema = z
+  .array(networkDomain)
+  .max(64)
+  .transform((domains) => [...new Set(domains)]);
 
 export const fxSkillSchema = z.object({
   name: z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,59}$/, "Skill names use lowercase letters, numbers and hyphens"),
@@ -40,4 +55,9 @@ export const fxMcpServersSchema = z.record(serverName, fxMcpServerSchema).refine
 export const optionalFxCapabilitiesSchema = {
   skills: fxSkillsSchema.optional(),
   mcpServers: fxMcpServersSchema.optional(),
+};
+
+export const optionalFxNetworkSchema = {
+  networkAccess: fxNetworkAccessSchema.optional(),
+  networkAllowlist: fxNetworkAllowlistSchema.optional(),
 };

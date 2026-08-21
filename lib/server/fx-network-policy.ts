@@ -1,4 +1,5 @@
 import type { SandboxNetworkPolicy } from "eve/sandbox";
+import type { FxNetworkAccess } from "@/lib/types";
 
 const AI_GATEWAY_HOST = "ai-gateway.vercel.sh";
 
@@ -17,17 +18,6 @@ const installAllow = {
   ],
 };
 
-const developmentAllow = {
-  ...installAllow,
-  "github.com": [],
-  "*.github.com": [],
-  "*.githubusercontent.com": [],
-  "registry.npmjs.org": [],
-  "*.npmjs.org": [],
-  "pypi.org": [],
-  "files.pythonhosted.org": [],
-};
-
 const deniedSubnets = [
   "10.0.0.0/8",
   "172.16.0.0/12",
@@ -42,16 +32,23 @@ export function idleFxNetworkPolicy(): SandboxNetworkPolicy {
   };
 }
 
-export function activeFxNetworkPolicy(): SandboxNetworkPolicy {
+export function activeFxNetworkPolicy(
+  access: FxNetworkAccess = "full",
+  allowlist: string[] = [],
+): SandboxNetworkPolicy {
+  if (access === "full") return "allow-all";
+
   return {
     allow: {
-      ...developmentAllow,
       [AI_GATEWAY_HOST]: [],
+      ...(access === "allowlist"
+        ? Object.fromEntries(allowlist.map((domain) => [domain, []]))
+        : {}),
     },
     subnets: { deny: deniedSubnets },
   };
 }
 
-export function usesStaticFxNetworkPolicy(vercelEnvironment = process.env.VERCEL): boolean {
+export function stopsFxSandboxAfterTurn(vercelEnvironment = process.env.VERCEL): boolean {
   return !vercelEnvironment;
 }

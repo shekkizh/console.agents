@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS agents (
   name text NOT NULL,
   specialty text NOT NULL,
   instructions text NOT NULL DEFAULT '',
-  fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"permissionMode":"yolo"}'::jsonb,
+  fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"networkAccess":"full","networkAllowlist":[]}'::jsonb,
   config_version integer NOT NULL DEFAULT 1,
   eve_session_id text,
   created_by_agent_id text,
@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 
 -- Additive migration for databases created by the earlier Console implementation.
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"permissionMode":"yolo"}'::jsonb;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"networkAccess":"full","networkAllowlist":[]}'::jsonb;
+ALTER TABLE agents ALTER COLUMN fx_config SET DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"networkAccess":"full","networkAllowlist":[]}'::jsonb;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS config_version integer NOT NULL DEFAULT 1;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS eve_session_id text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_by_agent_id text;

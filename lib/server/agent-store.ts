@@ -3,8 +3,8 @@ import { neon } from "@neondatabase/serverless";
 import { config, requireDatabaseUrl } from "@/lib/server/config";
 import { CONVERSATION_RUNTIME_VERSION } from "@/lib/conversation-runtime";
 import { projectAgentTranscript, type AgentEventRow } from "@/lib/agent-transcript";
-import { fxMcpServersSchema, fxSkillsSchema } from "@/lib/agent-capabilities";
-import type { AgentMessage, AgentProfile, FxAgentConfig, FxMcpServerConfig, FxSkillConfig } from "@/lib/types";
+import { fxMcpServersSchema, fxNetworkAllowlistSchema, fxSkillsSchema } from "@/lib/agent-capabilities";
+import type { AgentMessage, AgentProfile, FxAgentConfig, FxMcpServerConfig, FxNetworkAccess, FxSkillConfig } from "@/lib/types";
 
 interface AgentRow {
   id: string;
@@ -26,7 +26,8 @@ export interface AgentUpdate {
   instructions?: string;
   model?: string;
   maxSteps?: number;
-  permissionMode?: "auto" | "yolo";
+  networkAccess?: FxNetworkAccess;
+  networkAllowlist?: string[];
   skills?: FxSkillConfig[];
   mcpServers?: Record<string, FxMcpServerConfig>;
   enabled?: boolean;
@@ -42,7 +43,11 @@ export function defaultAgentId(ownerId: string): string {
 
 function normalizeFxConfig(value: unknown): FxAgentConfig {
   const configValue = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  const permissionMode = configValue.permissionMode === "auto" ? "auto" : "yolo";
+  const networkAccess =
+    configValue.networkAccess === "none" || configValue.networkAccess === "allowlist"
+      ? configValue.networkAccess
+      : "full";
+  const parsedNetworkAllowlist = fxNetworkAllowlistSchema.safeParse(configValue.networkAllowlist);
   const parsedSkills = fxSkillsSchema.safeParse(configValue.skills);
   const parsedMcpServers = fxMcpServersSchema.safeParse(configValue.mcpServers);
   return {
@@ -54,7 +59,8 @@ function normalizeFxConfig(value: unknown): FxAgentConfig {
       typeof configValue.maxSteps === "number" && Number.isInteger(configValue.maxSteps)
         ? Math.min(128, Math.max(1, configValue.maxSteps))
         : 48,
-    permissionMode,
+    networkAccess,
+    networkAllowlist: parsedNetworkAllowlist.success ? parsedNetworkAllowlist.data : [],
     skills: parsedSkills.success ? parsedSkills.data : [],
     mcpServers: parsedMcpServers.success ? parsedMcpServers.data : {},
   };
@@ -94,7 +100,7 @@ export async function ensureDefaultAgent(ownerId: string): Promise<AgentProfile>
     [
       id,
       ownerId,
-      JSON.stringify({ model: config.defaultFxModel, maxSteps: 48, permissionMode: "yolo", skills: [], mcpServers: {} }),
+      JSON.stringify({ model: config.defaultFxModel, maxSteps: 48, networkAccess: "full", networkAllowlist: [], skills: [], mcpServers: {} }),
     ],
   );
   return toAgent(rows[0] as AgentRow);
@@ -136,7 +142,8 @@ export async function createAgent(
     instructions: string;
     model?: string;
     maxSteps?: number;
-    permissionMode?: "auto" | "yolo";
+    networkAccess?: FxNetworkAccess;
+    networkAllowlist?: string[];
     skills?: FxSkillConfig[];
     mcpServers?: Record<string, FxMcpServerConfig>;
     createdByAgentId?: string | null;
@@ -147,7 +154,8 @@ export async function createAgent(
   const fxConfig: FxAgentConfig = {
     model: input.model ?? config.defaultFxModel,
     maxSteps: input.maxSteps ?? 48,
-    permissionMode: input.permissionMode ?? "yolo",
+    networkAccess: input.networkAccess ?? "full",
+    networkAllowlist: input.networkAllowlist ?? [],
     skills: input.skills ?? [],
     mcpServers: input.mcpServers ?? {},
   };
@@ -267,7 +275,8 @@ export async function updateAgent(
   const fxConfig: FxAgentConfig = {
     model: input.model ?? existing.fxConfig.model,
     maxSteps: input.maxSteps ?? existing.fxConfig.maxSteps,
-    permissionMode: input.permissionMode ?? existing.fxConfig.permissionMode,
+    networkAccess: input.networkAccess ?? existing.fxConfig.networkAccess,
+    networkAllowlist: input.networkAllowlist ?? existing.fxConfig.networkAllowlist,
     skills: input.skills ?? existing.fxConfig.skills,
     mcpServers: input.mcpServers ?? existing.fxConfig.mcpServers,
   };

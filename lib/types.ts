@@ -1,4 +1,4 @@
-export type FxPermissionMode = "auto" | "yolo";
+export type FxNetworkAccess = "full" | "none" | "allowlist";
 
 export interface FxSkillConfig {
   name: string;
@@ -21,7 +21,8 @@ export interface FxMcpServerConfig {
 export interface FxAgentConfig {
   model: string;
   maxSteps: number;
-  permissionMode: FxPermissionMode;
+  networkAccess: FxNetworkAccess;
+  networkAllowlist: string[];
   skills: FxSkillConfig[];
   mcpServers: Record<string, FxMcpServerConfig>;
 }

@@ -17,10 +17,12 @@ import {
 import {
   ChevronDownIcon,
   CircleIcon,
+  ExternalLinkIcon,
   FileCode2Icon,
   FileTextIcon,
   ImageIcon,
   LoaderCircleIcon,
+  Maximize2Icon,
   MoonIcon as LucideMoonIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
@@ -39,6 +41,7 @@ import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -81,7 +84,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import type { AgentArtifact, AgentMessage, AgentProfile, ConversationProfile } from "@/lib/types";
+import type { AgentArtifact, AgentMessage, AgentProfile, ConversationProfile, FxNetworkAccess } from "@/lib/types";
 
 interface TranscriptEntry {
   id: string;
@@ -251,7 +254,13 @@ function artifactSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function TextArtifactPreview({ artifact }: { artifact: AgentArtifact }) {
+function TextArtifactPreview({
+  artifact,
+  compact = false,
+}: {
+  artifact: AgentArtifact;
+  compact?: boolean;
+}) {
   const [content, setContent] = useState<string>();
   const [error, setError] = useState(false);
 
@@ -272,37 +281,110 @@ function TextArtifactPreview({ artifact }: { artifact: AgentArtifact }) {
   }, [artifact.id]);
 
   if (error) {
-    return <div className="px-4 py-8 text-center text-sm text-muted-foreground">Preview unavailable</div>;
+    return <div className={compact ? "px-4 py-5 text-sm text-muted-foreground" : "px-4 py-8 text-center text-sm text-muted-foreground"}>Preview unavailable</div>;
   }
   if (content === undefined) {
-    return <div className="shimmer px-4 py-8 text-center text-sm text-muted-foreground">Loading preview</div>;
+    return <div className={compact ? "shimmer px-4 py-5 text-sm text-muted-foreground" : "shimmer px-4 py-8 text-center text-sm text-muted-foreground"}>Loading preview</div>;
   }
   return (
-    <pre className="max-h-[32rem] overflow-auto p-4 text-xs leading-5">
+    <pre className={compact
+      ? "artifact-text-fade max-h-20 overflow-hidden whitespace-pre-wrap px-4 py-3 text-left text-xs leading-5 text-muted-foreground"
+      : "h-full overflow-auto bg-background p-5 text-xs leading-5 sm:p-8 sm:text-sm sm:leading-6"}>
       <code>{content}</code>
     </pre>
   );
 }
 
 function ArtifactPreview({ artifact }: { artifact: AgentArtifact }) {
+  const [open, setOpen] = useState(false);
   const source = `/api/artifacts/${encodeURIComponent(artifact.id)}`;
   const Icon = artifact.kind === "image" ? ImageIcon : artifact.kind === "pdf" ? FileTextIcon : FileCode2Icon;
+  const typeLabel = artifact.kind === "image" ? "Image" : artifact.kind === "pdf" ? "PDF" : "Text";
   return (
-    <figure className="overflow-hidden rounded-2xl border bg-card">
-      <figcaption className="flex items-center gap-2 border-b px-3 py-2 text-xs">
-        <Icon className="size-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-medium">{artifact.title}</span>
-        <span className="shrink-0 text-muted-foreground">{artifactSize(artifact.size)}</span>
-      </figcaption>
-      {artifact.kind === "image" ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img alt={artifact.title} className="max-h-[42rem] w-full bg-muted/30 object-contain" loading="lazy" src={source} />
-      ) : artifact.kind === "pdf" ? (
-        <iframe className="h-[36rem] w-full bg-white" src={source} title={artifact.title} />
-      ) : (
-        <TextArtifactPreview artifact={artifact} />
-      )}
-    </figure>
+    <>
+      <figure className="group overflow-hidden rounded-2xl border bg-card shadow-sm transition-colors hover:border-foreground/20">
+        <figcaption className="flex min-w-0 items-center gap-2.5 px-3 py-2.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+            <Icon className="size-4" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-xs font-medium">{artifact.title}</span>
+            <span className="mt-0.5 block text-[11px] text-muted-foreground">{typeLabel} · {artifactSize(artifact.size)}</span>
+          </span>
+          <Button aria-label={`Open ${artifact.title} in a new tab`} asChild size="icon-sm" variant="ghost">
+            <a href={source} rel="noopener noreferrer" target="_blank">
+              <ExternalLinkIcon />
+            </a>
+          </Button>
+          <Button onClick={() => setOpen(true)} size="sm" type="button" variant="secondary">
+            <Maximize2Icon />
+            View
+          </Button>
+        </figcaption>
+        <div className="relative h-20 w-full overflow-hidden border-t bg-muted/20 transition-colors hover:bg-muted/35">
+          <button
+            aria-label={`View ${artifact.title}`}
+            className="absolute inset-0 z-10 outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/30"
+            onClick={() => setOpen(true)}
+            type="button"
+          />
+          {artifact.kind === "image" ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img alt="" className="h-full w-full object-cover object-top opacity-80 transition-opacity group-hover:opacity-100" loading="lazy" src={source} />
+          ) : artifact.kind === "pdf" ? (
+            <iframe
+              aria-hidden="true"
+              className="pointer-events-none h-48 w-full -translate-y-9 bg-white opacity-75"
+              src={`${source}#toolbar=0&navpanes=0&scrollbar=0&view=FitH`}
+              tabIndex={-1}
+              title=""
+            />
+          ) : (
+            <TextArtifactPreview artifact={artifact} compact />
+          )}
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-card to-transparent" />
+        </div>
+      </figure>
+
+      <Dialog onOpenChange={setOpen} open={open}>
+        <DialogContent
+          aria-describedby={undefined}
+          className="h-[calc(100dvh-1rem)] max-h-none w-[calc(100vw-1rem)] max-w-none grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none"
+          showCloseButton={false}
+        >
+          <DialogHeader className="flex-row items-center gap-3 border-b px-4 py-3 pr-3 sm:px-5">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+              <Icon className="size-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <DialogTitle className="truncate">{artifact.title}</DialogTitle>
+              <DialogDescription className="mt-1 text-xs">{typeLabel} · {artifactSize(artifact.size)}</DialogDescription>
+            </span>
+            <Button aria-label={`Open ${artifact.title} in a new tab`} asChild size="sm" variant="outline">
+              <a href={source} rel="noopener noreferrer" target="_blank">
+                <ExternalLinkIcon />
+                <span className="hidden sm:inline">Open in new tab</span>
+              </a>
+            </Button>
+            <DialogClose asChild>
+              <Button aria-label="Close artifact viewer" size="icon-sm" type="button" variant="ghost">
+                <span aria-hidden="true" className="text-lg leading-none">×</span>
+              </Button>
+            </DialogClose>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-hidden bg-muted/30">
+            {artifact.kind === "image" ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img alt={artifact.title} className="h-full w-full object-contain" src={source} />
+            ) : artifact.kind === "pdf" ? (
+              <iframe className="h-full w-full bg-white" src={source} title={artifact.title} />
+            ) : (
+              <TextArtifactPreview artifact={artifact} />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -708,7 +790,10 @@ function AgentDialog({
   const [instructions, setInstructions] = useState(agent?.instructions ?? "");
   const [model, setModel] = useState(agent?.fxConfig.model ?? "zai/glm-5.2");
   const [maxSteps, setMaxSteps] = useState(agent?.fxConfig.maxSteps ?? 48);
-  const [permissionMode, setPermissionMode] = useState(agent?.fxConfig.permissionMode ?? "yolo");
+  const [networkAccess, setNetworkAccess] = useState<FxNetworkAccess>(agent?.fxConfig.networkAccess ?? "full");
+  const [networkAllowlist, setNetworkAllowlist] = useState(
+    (agent?.fxConfig.networkAllowlist ?? []).join("\n"),
+  );
   const [skills, setSkills] = useState(JSON.stringify(agent?.fxConfig.skills ?? [], null, 2));
   const [mcpServers, setMcpServers] = useState(
     JSON.stringify(agent?.fxConfig.mcpServers ?? {}, null, 2),
@@ -730,6 +815,14 @@ function AgentDialog({
       setSaving(false);
       return;
     }
+    const parsedNetworkAllowlist = [
+      ...new Set(
+        networkAllowlist
+          .split(/[\n,]/)
+          .map((domain) => domain.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    ];
     const response = await fetch(agent ? `/api/agents/${agent.id}` : "/api/agents", {
       method: agent ? "PATCH" : "POST",
       headers: { "content-type": "application/json" },
@@ -739,7 +832,8 @@ function AgentDialog({
         instructions,
         model,
         maxSteps,
-        permissionMode,
+        networkAccess,
+        networkAllowlist: parsedNetworkAllowlist,
         skills: parsedSkills,
         mcpServers: parsedMcpServers,
       }),
@@ -786,16 +880,33 @@ function AgentDialog({
               <Input id="agent-steps" max={128} min={1} onChange={(event) => setMaxSteps(Number(event.target.value))} required type="number" value={maxSteps} />
             </div>
             <div className="grid gap-2">
-              <Label>Permissions</Label>
-              <Select onValueChange={(value) => setPermissionMode(value as "auto" | "yolo")} value={permissionMode}>
+              <Label>Network access</Label>
+              <Select onValueChange={(value) => setNetworkAccess(value as FxNetworkAccess)} value={networkAccess}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="auto">Ask when needed</SelectItem>
-                  <SelectItem value="yolo">Full sandbox access</SelectItem>
+                  <SelectItem value="full">Full access</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="allowlist">Allowlist</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
+          {networkAccess === "allowlist" ? (
+            <div className="grid gap-2">
+              <Label htmlFor="agent-network-allowlist">Allowed domains</Label>
+              <Textarea
+                id="agent-network-allowlist"
+                onChange={(event) => setNetworkAllowlist(event.target.value)}
+                placeholder={"github.com\n*.npmjs.org"}
+                rows={3}
+                spellCheck={false}
+                value={networkAllowlist}
+              />
+              <p className="text-xs text-muted-foreground">One domain per line. The model connection remains available in every mode.</p>
+            </div>
+          ) : (
+            <p className="-mt-3 text-xs text-muted-foreground">Controls outbound internet access from agent tools. The model connection remains available.</p>
+          )}
           <details className="group rounded-3xl border bg-muted/20">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium">
               <span>Skills & MCP</span>
