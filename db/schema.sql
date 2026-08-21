@@ -121,6 +121,26 @@ CREATE INDEX IF NOT EXISTS agent_events_agent_created_idx
 CREATE INDEX IF NOT EXISTS agent_events_conversation_created_idx
   ON agent_events(owner_id, conversation_id, created_at ASC);
 
+CREATE TABLE IF NOT EXISTS agent_artifacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id text NOT NULL,
+  agent_id text NOT NULL,
+  conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  request_id text NOT NULL,
+  sandbox_path text NOT NULL,
+  filename text NOT NULL,
+  title text NOT NULL,
+  media_type text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('image', 'pdf', 'text')),
+  size_bytes integer NOT NULL CHECK (size_bytes >= 0),
+  content bytea NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, conversation_id, request_id, sandbox_path)
+);
+
+CREATE INDEX IF NOT EXISTS agent_artifacts_owner_conversation_idx
+  ON agent_artifacts(owner_id, conversation_id, created_at ASC);
+
 CREATE UNIQUE INDEX IF NOT EXISTS agent_events_unique_user_request_idx
   ON agent_events(owner_id, conversation_id, (payload->>'requestId'))
   WHERE conversation_id IS NOT NULL

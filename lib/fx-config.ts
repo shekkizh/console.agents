@@ -13,7 +13,30 @@ export function fxProjectConfig(agent: AgentProfile): string {
 }
 
 export function fxAgentInstructions(agent: AgentProfile): string {
-  return `# ${agent.name}\n\nRole: ${agent.specialty}\n\n${agent.instructions}\n\n## Console runtime\n\nYou are agent \`${agent.id}\` in a persistent, externally isolated sandbox. Each activation is a message from Eve. Treat its content as your primary objective and do the work directly. Your final response is automatically delivered back to Eve as the correlated reply; do not poll for delivery or wrap it in a transport envelope.\n\nYou own reasoning, planning, tool choice, shell work, files, skills, and subagents. Use those capabilities autonomously instead of asking Eve to construct a workflow for you. Prefer flexible model judgment and reusable skills over hard-coded task-specific automation. You have full control of this sandbox, but never claim access outside it.\n\nThe Console control plane remains trusted and separate. Use the \`console-platform\` skill when asked to list agents, create another persistent agent, or change your own registered profile. Creating a local process or subagent does not add it to Console until you register it through that skill. Credentials are brokered outside your process; never attempt to discover, print, copy, or persist them.\n`;
+  return `# ${agent.name}
+
+Role: ${agent.specialty}
+
+${agent.instructions}
+
+## Console runtime
+
+You are agent \`${agent.id}\` in a persistent, externally isolated sandbox. Each activation is a message from Eve. Treat its content as your primary objective and do the work directly. Your final response is automatically delivered back to Eve as the correlated reply; do not poll for delivery or wrap it in a transport envelope.
+
+You own reasoning, planning, tool choice, shell work, files, skills, and subagents. Use those capabilities autonomously instead of asking Eve to construct a workflow for you. Prefer flexible model judgment and reusable skills over hard-coded task-specific automation. You have full control of this sandbox, but never claim access outside it.
+
+### Inline previews
+
+When you create files the user should see with your response, place or copy them under \`/workspace/.console/previews/\`, then write \`/workspace/.console/artifacts.json\` before finishing:
+
+\`\`\`json
+{"files":[{"path":".console/previews/example.png","title":"Optional preview title"}]}
+\`\`\`
+
+Declare at most four files. Console previews PNG, JPEG, GIF, WebP, PDF, UTF-8 text, code, Markdown, CSV, and JSON. Keep each image or PDF under 4 MB and each text file under 1 MB. Use paths relative to \`/workspace\`, do not declare secrets, and do not put raw sandbox paths or download links in the final response. For office documents, create a PDF preview.
+
+The Console control plane remains trusted and separate. Use the \`console-platform\` skill when asked to list agents, create another persistent agent, or change your own registered profile. Creating a local process or subagent does not add it to Console until you register it through that skill. Credentials are brokered outside your process; never attempt to discover, print, copy, or persist them.
+`;
 }
 
 export function fxSkillFile(skill: FxSkillConfig): string {

@@ -43,4 +43,11 @@ if (!runtimeVersionRows[0]) {
   throw new Error("Migration verification failed: missing conversations.runtime_version");
 }
 
+const artifactRows = await sql.query(
+  `SELECT to_regclass('public.agent_artifacts') AS relation`,
+);
+if (!(artifactRows[0] as { relation?: unknown } | undefined)?.relation) {
+  throw new Error("Migration verification failed: missing agent_artifacts table");
+}
+
 console.log(`Database schema is current (${statements.length} statements applied).`);

@@ -10,6 +10,7 @@ import { runFxTurn } from "@/lib/server/fx-runtime";
 import { drainMailbox } from "@/lib/server/mailbox-drain";
 import { config } from "@/lib/server/config";
 import { runE2EFakeFxTurn } from "@/lib/server/e2e-fx";
+import { storeAgentArtifacts } from "@/lib/server/artifact-store";
 
 function selectedAttribute(
   attributes: Readonly<Record<string, string | readonly string[]>>,
@@ -65,6 +66,15 @@ export default defineTool({
                 sandbox: sandbox!,
                 abortSignal: ctx.abortSignal,
               });
+          const artifacts = result.artifacts.length === 0
+            ? []
+            : await storeAgentArtifacts({
+                ownerId: principal.principalId,
+                agentId,
+                conversationId,
+                requestId: request.requestId,
+                artifacts: result.artifacts,
+              });
           await recordAgentEvent({
             ownerId: principal.principalId,
             agentId,
@@ -79,6 +89,7 @@ export default defineTool({
               sessionId: result.sessionId,
               steps: result.steps,
               controlPlaneChanges: result.controlPlaneChanges,
+              artifacts,
             },
           });
           return {

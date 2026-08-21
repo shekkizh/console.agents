@@ -40,11 +40,23 @@ export interface AgentProfile {
   updatedAt: string;
 }
 
+export type AgentArtifactKind = "image" | "pdf" | "text";
+
+export interface AgentArtifact {
+  id: string;
+  name: string;
+  title: string;
+  mediaType: string;
+  kind: AgentArtifactKind;
+  size: number;
+}
+
 export interface AgentMessage {
   id: string;
   requestId: string;
   role: "user" | "assistant";
   text: string;
+  artifacts: AgentArtifact[];
   failed: boolean;
   createdAt: string;
 }

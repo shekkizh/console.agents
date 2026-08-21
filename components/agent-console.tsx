@@ -17,6 +17,9 @@ import {
 import {
   ChevronDownIcon,
   CircleIcon,
+  FileCode2Icon,
+  FileTextIcon,
+  ImageIcon,
   LoaderCircleIcon,
   MoonIcon as LucideMoonIcon,
   PanelLeftCloseIcon,
@@ -78,12 +81,13 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import type { AgentMessage, AgentProfile, ConversationProfile } from "@/lib/types";
+import type { AgentArtifact, AgentMessage, AgentProfile, ConversationProfile } from "@/lib/types";
 
 interface TranscriptEntry {
   id: string;
   role: "user" | "assistant";
   text: string;
+  artifacts: AgentArtifact[];
   failed: boolean;
 }
 
@@ -185,10 +189,11 @@ function SiteSettings() {
 }
 
 function mergeTranscript(saved: readonly AgentMessage[], live: readonly TranscriptEntry[]) {
-  const merged: TranscriptEntry[] = saved.map(({ id, role, text, failed }) => ({
+  const merged: TranscriptEntry[] = saved.map(({ id, role, text, artifacts, failed }) => ({
     id,
     role,
     text,
+    artifacts,
     failed,
   }));
   const savedCounts = new Map<string, number>();
@@ -238,6 +243,76 @@ function MessageText({ text }: { text: string }) {
       </pre>
     );
   });
+}
+
+function artifactSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function TextArtifactPreview({ artifact }: { artifact: AgentArtifact }) {
+  const [content, setContent] = useState<string>();
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(`/api/artifacts/${encodeURIComponent(artifact.id)}`, {
+      cache: "force-cache",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Preview unavailable");
+        setContent(await response.text());
+      })
+      .catch((caught: unknown) => {
+        if (!(caught instanceof DOMException && caught.name === "AbortError")) setError(true);
+      });
+    return () => controller.abort();
+  }, [artifact.id]);
+
+  if (error) {
+    return <div className="px-4 py-8 text-center text-sm text-muted-foreground">Preview unavailable</div>;
+  }
+  if (content === undefined) {
+    return <div className="shimmer px-4 py-8 text-center text-sm text-muted-foreground">Loading preview</div>;
+  }
+  return (
+    <pre className="max-h-[32rem] overflow-auto p-4 text-xs leading-5">
+      <code>{content}</code>
+    </pre>
+  );
+}
+
+function ArtifactPreview({ artifact }: { artifact: AgentArtifact }) {
+  const source = `/api/artifacts/${encodeURIComponent(artifact.id)}`;
+  const Icon = artifact.kind === "image" ? ImageIcon : artifact.kind === "pdf" ? FileTextIcon : FileCode2Icon;
+  return (
+    <figure className="overflow-hidden rounded-2xl border bg-card">
+      <figcaption className="flex items-center gap-2 border-b px-3 py-2 text-xs">
+        <Icon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-medium">{artifact.title}</span>
+        <span className="shrink-0 text-muted-foreground">{artifactSize(artifact.size)}</span>
+      </figcaption>
+      {artifact.kind === "image" ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img alt={artifact.title} className="max-h-[42rem] w-full bg-muted/30 object-contain" loading="lazy" src={source} />
+      ) : artifact.kind === "pdf" ? (
+        <iframe className="h-[36rem] w-full bg-white" src={source} title={artifact.title} />
+      ) : (
+        <TextArtifactPreview artifact={artifact} />
+      )}
+    </figure>
+  );
+}
+
+function ArtifactPreviews({ artifacts }: { artifacts: readonly AgentArtifact[] }) {
+  if (artifacts.length === 0) return null;
+  return (
+    <div className="mt-4 grid gap-3">
+      {artifacts.map((artifact) => <ArtifactPreview artifact={artifact} key={artifact.id} />)}
+    </div>
+  );
 }
 
 function AgentChat({
@@ -316,6 +391,7 @@ function AgentChat({
                 id: message.id,
                 role: message.role,
                 text,
+                artifacts: [],
                 failed: message.metadata?.status === "failed",
               },
             ]
@@ -391,6 +467,7 @@ function AgentChat({
         requestId: messageId,
         role: "user",
         text: message,
+        artifacts: [],
         failed: false,
         createdAt: new Date().toISOString(),
       },
@@ -540,7 +617,12 @@ function AgentChat({
                         {entry.role === "assistant" ? <MessageHeader>{agent.name}</MessageHeader> : null}
                         <Bubble className={entry.role === "assistant" ? "w-full" : "max-w-[min(85%,40rem)]"} variant={entry.failed ? "destructive" : entry.role === "assistant" ? "ghost" : "secondary"}>
                           <BubbleContent className={entry.role === "assistant" ? "message-copy w-full text-[0.925rem] leading-7" : "message-copy whitespace-pre-wrap px-4 py-3"}>
-                            {entry.role === "assistant" ? <Markdown>{entry.text}</Markdown> : <MessageText text={entry.text} />}
+                            {entry.role === "assistant" ? (
+                              <>
+                                <Markdown>{entry.text}</Markdown>
+                                <ArtifactPreviews artifacts={entry.artifacts} />
+                              </>
+                            ) : <MessageText text={entry.text} />}
                           </BubbleContent>
                         </Bubble>
                         {entry.failed ? (

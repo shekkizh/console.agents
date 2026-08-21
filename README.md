@@ -25,6 +25,8 @@ The execution engine has unrestricted filesystem and process access inside the s
 
 To create another persistent agent or update itself, the engine writes a bounded request to `.console/control-plane.json`. After the turn, trusted Eve code validates at most five requests, applies them to Neon, records an audit event, and clears the outbox. Newly created agents appear in the UI after the roster refresh.
 
+Agents can also publish inline-only previews by declaring files from `.console/previews/` in `.console/artifacts.json`. Before sandbox shutdown, the trusted runtime verifies paths, sizes, file signatures, and UTF-8 text, then stores the private preview with the conversation. Authenticated message views render images, PDFs, and text/code directly in the chat; raw sandbox paths are never exposed to the browser.
+
 ## Setup
 
 Requirements: Node.js 24+, a Clerk application, Neon Postgres, Vercel AI Gateway, and either Vercel Sandbox or local microsandbox support.
