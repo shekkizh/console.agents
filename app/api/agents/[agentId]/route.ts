@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { optionalFxCapabilitiesSchema, optionalFxNetworkSchema } from "@/lib/agent-capabilities";
 import { requireOwner } from "@/lib/server/auth";
-import { deleteAgent, listAgentMessages, updateAgent } from "@/lib/server/agent-store";
+import { deleteAgent, updateAgent } from "@/lib/server/agent-store";
 
 const updateSchema = z
   .object({
@@ -16,17 +16,6 @@ const updateSchema = z
     enabled: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, "Provide at least one field");
-
-export async function GET(_request: Request, context: { params: Promise<{ agentId: string }> }) {
-  try {
-    const ownerId = await requireOwner();
-    const { agentId } = await context.params;
-    return NextResponse.json({ messages: await listAgentMessages(ownerId, agentId) });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to load agent messages";
-    return NextResponse.json({ error: message }, { status: message === "Unauthorized" ? 401 : 400 });
-  }
-}
 
 export async function PATCH(request: Request, context: { params: Promise<{ agentId: string }> }) {
   try {

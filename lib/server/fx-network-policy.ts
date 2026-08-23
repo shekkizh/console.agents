@@ -1,5 +1,6 @@
 import type { SandboxNetworkPolicy } from "eve/sandbox";
 import type { FxNetworkAccess } from "@/lib/types";
+import { consoleAgentApiHost } from "@/lib/server/config";
 
 const AI_GATEWAY_HOST = "ai-gateway.vercel.sh";
 
@@ -35,12 +36,15 @@ export function idleFxNetworkPolicy(): SandboxNetworkPolicy {
 export function activeFxNetworkPolicy(
   access: FxNetworkAccess = "full",
   allowlist: string[] = [],
+  agentApiHost?: string,
 ): SandboxNetworkPolicy {
   if (access === "full") return "allow-all";
+  const messagingHost = agentApiHost ?? consoleAgentApiHost();
 
   return {
     allow: {
       [AI_GATEWAY_HOST]: [],
+      [messagingHost]: [],
       ...(access === "allowlist"
         ? Object.fromEntries(allowlist.map((domain) => [domain, []]))
         : {}),

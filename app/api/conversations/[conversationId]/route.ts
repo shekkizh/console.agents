@@ -3,6 +3,7 @@ import { requireOwner } from "@/lib/server/auth";
 import {
   deleteConversation,
   getConversation,
+  listConversationActivity,
   listConversationMessages,
 } from "@/lib/server/conversation-store";
 
@@ -20,6 +21,7 @@ export async function GET(
     return NextResponse.json({
       conversation,
       messages: await listConversationMessages(ownerId, conversationId),
+      activity: await listConversationActivity(ownerId, conversationId),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to load conversation";

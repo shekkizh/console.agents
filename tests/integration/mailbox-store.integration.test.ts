@@ -5,9 +5,7 @@ import {
   createAgent,
   deleteAgent,
   ensureDefaultAgent,
-  nextPendingAgentMessage,
-  recordAgentEvent,
-  recordIncomingAgentMessage,
+  resetAgentSession,
 } from "../../lib/server/agent-store.ts";
 import {
   createConversation,
@@ -15,16 +13,22 @@ import {
   getConversation,
   listConversationMessages,
 } from "../../lib/server/conversation-store.ts";
+import {
+  markMessageDelivery,
+  nextPendingAgentMessage,
+  publishConversationMessage,
+} from "../../lib/server/message-store.ts";
+import { requireDatabaseUrl } from "../../lib/server/config.ts";
 
 const databaseEnabled =
   process.env.RUN_DATABASE_TESTS === "1" && Boolean(process.env.DATABASE_URL);
 
 test(
-  "persists an idempotent FIFO mailbox and enforces one terminal result per request",
+  "persists an idempotent FIFO mailbox on the canonical message bus",
   { skip: !databaseEnabled },
   async (t) => {
     const ownerId = `integration-mailbox-${process.pid}-${Date.now()}`;
-    const sql = neon(process.env.DATABASE_URL!);
+    const sql = neon(requireDatabaseUrl());
 
     t.after(async () => {
       await sql.query("DELETE FROM agent_events WHERE owner_id = $1", [ownerId]);
@@ -36,6 +40,19 @@ test(
     const conversation = await createConversation(ownerId, agent.id);
 
     await sql.query(
+      "UPDATE agents SET eve_session_id = $3 WHERE owner_id = $1 AND id = $2",
+      [ownerId, agent.id, "stale-session"],
+    );
+    assert.equal(
+      (await resetAgentSession(ownerId, agent.id, "different-session")).eveSessionId,
+      "stale-session",
+    );
+    assert.equal(
+      (await resetAgentSession(ownerId, agent.id, "stale-session")).eveSessionId,
+      null,
+    );
+
+    await sql.query(
       `UPDATE conversations
        SET runtime_version = 1, eve_session_id = 'legacy-session'
        WHERE owner_id = $1 AND id = $2`,
@@ -44,22 +61,24 @@ test(
 
     const first = {
       ownerId,
-      agentId: agent.id,
+      id: "request-alpha",
       conversationId: conversation.id,
-      messageId: "request-alpha",
-      message: "alpha",
+      senderType: "human" as const,
+      senderId: ownerId,
+      recipientType: "agent" as const,
+      recipientId: agent.id,
+      content: "alpha",
     };
     await Promise.all([
-      recordIncomingAgentMessage(first),
-      recordIncomingAgentMessage(first),
+      publishConversationMessage(first),
+      publishConversationMessage(first),
     ]);
 
     const rotatedRows = await sql.query(
       `SELECT runtime_version, eve_session_id,
-         (SELECT count(*)::int FROM agent_events
+         (SELECT count(*)::int FROM conversation_messages
           WHERE owner_id = $1 AND conversation_id = $2
-            AND event_type = 'message.user'
-            AND payload->>'requestId' = 'request-alpha') AS request_count
+            AND id = 'request-alpha') AS request_count
        FROM conversations WHERE owner_id = $1 AND id = $2`,
       [ownerId, conversation.id],
     );
@@ -69,77 +88,67 @@ test(
       request_count: 1,
     });
 
-    await recordIncomingAgentMessage({
+    await publishConversationMessage({
       ...first,
-      messageId: "request-beta",
-      message: "beta",
-      eveSessionId: "current-session",
+      id: "request-beta",
+      content: "beta",
     });
-    await assert.rejects(
-      recordIncomingAgentMessage({
-        ...first,
-        messageId: "request-wrong-session",
-        message: "must not be accepted",
-        eveSessionId: "other-session",
-      }),
-      /Conversation not found/,
-    );
-
     const pendingAlpha = await nextPendingAgentMessage({
       ownerId,
       agentId: agent.id,
       conversationId: conversation.id,
     });
-    assert.deepEqual(pendingAlpha, { message: "alpha", requestId: "request-alpha" });
+    assert.equal(pendingAlpha?.id, "request-alpha");
+    assert.equal(pendingAlpha?.content, "alpha");
+    assert.equal(pendingAlpha?.deliveryState, "claimed");
 
-    await recordAgentEvent({
+    await markMessageDelivery(ownerId, "request-alpha", agent.id, "completed");
+    await publishConversationMessage({
+      ownerId,
+      id: "reply-alpha",
+      conversationId: conversation.id,
+      senderType: "agent",
+      senderId: agent.id,
+      recipientType: "human",
+      recipientId: ownerId,
+      inReplyTo: "request-alpha",
+      content: "answer-alpha",
+    });
+
+    const pendingBeta = await nextPendingAgentMessage({
       ownerId,
       agentId: agent.id,
       conversationId: conversation.id,
-      actorType: "agent",
-      actorId: agent.id,
-      eventType: "message.assistant",
-      payload: { message: "answer-alpha", requestId: "request-alpha" },
     });
-    assert.deepEqual(
-      await nextPendingAgentMessage({
-        ownerId,
-        agentId: agent.id,
-        conversationId: conversation.id,
-      }),
-      { message: "beta", requestId: "request-beta" },
-    );
+    assert.equal(pendingBeta?.id, "request-beta");
+    assert.equal(pendingBeta?.content, "beta");
 
+    await markMessageDelivery(ownerId, "request-beta", agent.id, "completed");
     await Promise.all([
-      recordAgentEvent({
+      publishConversationMessage({
         ownerId,
-        agentId: agent.id,
+        id: "reply-beta",
         conversationId: conversation.id,
-        actorType: "agent",
-        actorId: agent.id,
-        eventType: "message.assistant",
-        payload: { message: "answer-beta", requestId: "request-beta" },
+        senderType: "agent",
+        senderId: agent.id,
+        recipientType: "human",
+        recipientId: ownerId,
+        inReplyTo: "request-beta",
+        content: "answer-beta",
       }),
-      recordAgentEvent({
+      publishConversationMessage({
         ownerId,
-        agentId: agent.id,
+        id: "reply-beta",
         conversationId: conversation.id,
-        actorType: "eve",
-        actorId: "current-session",
-        eventType: "message.failed",
-        payload: { diagnostic: "racing terminal", requestId: "request-beta" },
+        senderType: "agent",
+        senderId: agent.id,
+        recipientType: "human",
+        recipientId: ownerId,
+        inReplyTo: "request-beta",
+        content: "answer-beta",
       }),
     ]);
 
-    const terminalRows = await sql.query(
-      `SELECT count(*)::int AS terminal_count
-       FROM agent_events
-       WHERE owner_id = $1 AND conversation_id = $2
-         AND event_type IN ('message.assistant', 'message.failed')
-         AND payload->>'requestId' = 'request-beta'`,
-      [ownerId, conversation.id],
-    );
-    assert.equal(terminalRows[0]?.terminal_count, 1);
     assert.equal(
       await nextPendingAgentMessage({
         ownerId,
@@ -148,32 +157,40 @@ test(
       }),
       undefined,
     );
-
-    const transcript = await listConversationMessages(ownerId, conversation.id);
     assert.deepEqual(
-      transcript.filter((message) => message.role === "user").map((message) => message.text),
-      ["alpha", "beta"],
+      (await listConversationMessages(ownerId, conversation.id)).map(
+        ({ role, text }) => ({ role, text }),
+      ),
+      [
+        { role: "user", text: "alpha" },
+        { role: "user", text: "beta" },
+        { role: "assistant", text: "answer-alpha" },
+        { role: "assistant", text: "answer-beta" },
+      ],
     );
-    await sql.query(
-      `UPDATE conversations SET title = 'New conversation'
-       WHERE owner_id = $1 AND id = $2`,
+    const eventRows = await sql.query(
+      `SELECT count(*)::int AS count FROM agent_events
+       WHERE owner_id = $1 AND conversation_id = $2
+         AND event_type LIKE 'message.%'`,
       [ownerId, conversation.id],
     );
+    assert.equal(eventRows[0]?.count, 0);
+
     const persisted = await getConversation(ownerId, conversation.id);
     assert.equal(persisted?.title, "alpha");
-    assert.equal(persisted?.eveSessionId, "current-session");
-    assert.notEqual(persisted?.status, "working");
+    assert.equal(persisted?.eveSessionId, null);
+    assert.equal(persisted?.status, "completed");
   },
 );
 
 test(
-  "deletes owner-scoped conversations and reassigns a deleted agent's history to General",
+  "deletes conversation messages and preserves reassigned history without crossing owners",
   { skip: !databaseEnabled },
   async (t) => {
     const suffix = `${process.pid}-${Date.now()}`;
     const ownerId = `integration-delete-${suffix}`;
     const otherOwnerId = `integration-delete-other-${suffix}`;
-    const sql = neon(process.env.DATABASE_URL!);
+    const sql = neon(requireDatabaseUrl());
 
     t.after(async () => {
       for (const testOwnerId of [ownerId, otherOwnerId]) {
@@ -191,35 +208,45 @@ test(
     });
     const firstConversation = await createConversation(ownerId, specialist.id);
     const secondConversation = await createConversation(ownerId, specialist.id);
-    await recordAgentEvent({
-      ownerId,
-      agentId: specialist.id,
-      conversationId: firstConversation.id,
-      actorType: "human",
-      actorId: ownerId,
-      eventType: "message.user",
-      payload: { message: "delete this conversation", requestId: "delete-first" },
-    });
-    await recordAgentEvent({
-      ownerId,
-      agentId: specialist.id,
-      conversationId: secondConversation.id,
-      actorType: "human",
-      actorId: ownerId,
-      eventType: "message.user",
-      payload: { message: "delete with agent", requestId: "delete-second" },
-    });
+    for (const [conversation, requestId, content] of [
+      [firstConversation, "delete-first", "delete this conversation"],
+      [secondConversation, "delete-second", "preserve with agent"],
+    ] as const) {
+      await publishConversationMessage({
+        ownerId,
+        id: requestId,
+        conversationId: conversation.id,
+        senderType: "human",
+        senderId: ownerId,
+        recipientType: "agent",
+        recipientId: specialist.id,
+        content,
+      });
+      await markMessageDelivery(ownerId, requestId, specialist.id, "completed");
+      await publishConversationMessage({
+        ownerId,
+        id: `reply-${requestId}`,
+        conversationId: conversation.id,
+        senderType: "agent",
+        senderId: specialist.id,
+        recipientType: "human",
+        recipientId: ownerId,
+        inReplyTo: requestId,
+        content: `answered: ${content}`,
+      });
+    }
 
     const otherGeneral = await ensureDefaultAgent(otherOwnerId);
     const otherConversation = await createConversation(otherOwnerId, otherGeneral.id);
-    await recordAgentEvent({
+    await publishConversationMessage({
       ownerId: otherOwnerId,
-      agentId: otherGeneral.id,
+      id: "other-request",
       conversationId: otherConversation.id,
-      actorType: "human",
-      actorId: otherOwnerId,
-      eventType: "message.user",
-      payload: { message: "must survive", requestId: "other-request" },
+      senderType: "human",
+      senderId: otherOwnerId,
+      recipientType: "agent",
+      recipientId: otherGeneral.id,
+      content: "must survive",
     });
 
     await assert.rejects(
@@ -230,42 +257,35 @@ test(
     const firstCounts = await sql.query(
       `SELECT
          (SELECT count(*)::int FROM conversations WHERE owner_id = $1 AND id = $2) AS conversations,
-         (SELECT count(*)::int FROM agent_events WHERE owner_id = $1 AND conversation_id = $2) AS events`,
+         (SELECT count(*)::int FROM conversation_messages
+          WHERE owner_id = $1 AND conversation_id = $2) AS messages`,
       [ownerId, firstConversation.id],
     );
-    assert.deepEqual(firstCounts[0], { conversations: 0, events: 0 });
-    assert.ok(await getConversation(ownerId, secondConversation.id));
+    assert.deepEqual(firstCounts[0], { conversations: 0, messages: 0 });
 
     await assert.rejects(deleteAgent(ownerId, general.id), /General agent cannot be deleted/);
     await assert.rejects(deleteAgent(otherOwnerId, specialist.id), /Agent not found/);
     await deleteAgent(ownerId, specialist.id);
 
-    const specialistCounts = await sql.query(
-      `SELECT
-         (SELECT count(*)::int FROM agents WHERE owner_id = $1 AND id = $2) AS agents,
-         (SELECT count(*)::int FROM conversations WHERE owner_id = $1 AND agent_id = $2) AS conversations,
-         (SELECT count(*)::int FROM agent_events WHERE owner_id = $1 AND agent_id = $2) AS events`,
-      [ownerId, specialist.id],
-    );
-    assert.deepEqual(specialistCounts[0], { agents: 0, conversations: 0, events: 1 });
     const reassigned = await getConversation(ownerId, secondConversation.id);
     assert.equal(reassigned?.agentId, general.id);
     assert.equal(reassigned?.agentName, general.name);
     assert.equal(reassigned?.eveSessionId, null);
-    assert.equal(reassigned?.status, "failed");
     assert.deepEqual(
       (await listConversationMessages(ownerId, secondConversation.id)).map(
-        ({ role, text, failed }) => ({ role, text, failed }),
+        ({ role, text }) => ({ role, text }),
       ),
-      [{ role: "user", text: "delete with agent", failed: true }],
+      [
+        { role: "user", text: "preserve with agent" },
+        { role: "assistant", text: "answered: preserve with agent" },
+      ],
     );
     assert.ok(await getConversation(otherOwnerId, otherConversation.id));
-
-    const otherEventRows = await sql.query(
-      `SELECT count(*)::int AS count FROM agent_events
+    const otherRows = await sql.query(
+      `SELECT count(*)::int AS count FROM conversation_messages
        WHERE owner_id = $1 AND conversation_id = $2`,
       [otherOwnerId, otherConversation.id],
     );
-    assert.equal(otherEventRows[0]?.count, 1);
+    assert.equal(otherRows[0]?.count, 1);
   },
 );

@@ -72,6 +72,11 @@ test("renders the sandbox boundary into fx instructions", () => {
   });
   assert.match(instructions, /console-platform/);
   assert.doesNotMatch(instructions, /sk_[A-Za-z0-9]/);
+  assert.match(instructions, /a2a list/);
+  assert.match(instructions, /a2a send/);
+  assert.doesNotMatch(instructions, /a2a_(?:list|send|wait)/);
+  assert.match(instructions, /decide autonomously whether collaboration is useful/i);
+  assert.match(instructions, /\.console\/outbox/);
 });
 
 test("parses fx ask JSON output", () => {

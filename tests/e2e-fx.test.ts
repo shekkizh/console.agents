@@ -22,6 +22,15 @@ test("parses only bounded deterministic E2E requests", () => {
     delayMs: 25,
     reply: "ALPHA",
   });
+  assert.deepEqual(
+    parseE2EFakeRequest(
+      "[message]\nfrom: Reviewer (agent-reviewer)\nmessageId: 00000000-0000-4000-8000-000000000001\nconversationId: conversation-1\n\nE2E_FAKE delay=5 reply=PEER",
+    ),
+    {
+      delayMs: 5,
+      reply: "PEER",
+    },
+  );
   assert.throws(() => parseE2EFakeRequest("do real work"), /Invalid E2E/);
   assert.throws(() => parseE2EFakeRequest("E2E_FAKE delay=1 reply=has spaces"), /Invalid E2E/);
 });

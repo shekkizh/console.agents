@@ -1,11 +1,18 @@
+import { createHash } from "node:crypto";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import {
+  claimAgentSession,
   getAgent,
-  nextPendingAgentMessage,
-  recordAgentEvent,
 } from "@/lib/server/agent-store";
-import { claimConversationSession } from "@/lib/server/conversation-store";
+import {
+  isMessageDeliveryPending,
+  markMessageDelivery,
+  nextPendingAgentMessage,
+  publishConversationMessage,
+} from "@/lib/server/message-store";
+import { wakeMessage } from "@/lib/server/message-runtime";
+import { getConversation } from "@/lib/server/conversation-store";
 import { runFxTurn } from "@/lib/server/fx-runtime";
 import { drainMailbox } from "@/lib/server/mailbox-drain";
 import { config } from "@/lib/server/config";
@@ -34,12 +41,9 @@ export default defineTool({
       "conversationId",
       "No conversation was selected",
     );
-    let { agent } = await claimConversationSession({
-      ownerId: principal.principalId,
-      conversationId,
-      agentId,
-      eveSessionId: ctx.session.id,
-    });
+    let agent = await claimAgentSession(principal.principalId, agentId, ctx.session.id);
+    const conversation = await getConversation(principal.principalId, conversationId);
+    if (!conversation) throw new Error("Conversation not found");
     const sandbox = config.e2eFakeFx ? undefined : await ctx.getSandbox();
     let processed = 0;
 
@@ -52,49 +56,86 @@ export default defineTool({
           conversationId,
         }),
       activate: async (request) => {
+        const replyId = (kind: "reply" | "error") => {
+          const hex = createHash("sha256")
+            .update(`${kind}:\0${principal.principalId}:\0${agentId}:\0${request.id}`)
+            .digest("hex")
+            .slice(0, 32);
+          return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`;
+        };
+        const recipientType = request.senderType === "agent" ? "agent" as const : "human" as const;
+        const recipientId = request.senderType === "agent"
+          ? request.senderId
+          : principal.principalId;
         try {
           const result = config.e2eFakeFx
             ? await runE2EFakeFxTurn({
                 agent,
-                prompt: request.message,
+                prompt: request.content,
                 abortSignal: ctx.abortSignal,
               })
             : await runFxTurn({
                 ownerId: principal.principalId,
                 agent,
-                prompt: request.message,
+                conversationId,
+                prompt: request.content,
+                incomingMessageId: request.id,
+                incomingFromAgentId: request.senderType === "agent"
+                  ? request.senderId
+                  : undefined,
                 sandbox: sandbox!,
                 abortSignal: ctx.abortSignal,
               });
-          const artifacts = result.artifacts.length === 0
-            ? []
-            : await storeAgentArtifacts({
+          if (!await isMessageDeliveryPending(principal.principalId, request.id, agentId)) {
+            return {
+              answer: "Task stopped.",
+              requestId: request.id,
+              model: result.model,
+              steps: result.steps,
+              controlPlaneChanges: [],
+              failed: false,
+            };
+          }
+          const artifacts = recipientType === "human" && result.artifacts.length > 0
+            ? await storeAgentArtifacts({
                 ownerId: principal.principalId,
                 agentId,
                 conversationId,
-                requestId: request.requestId,
+                requestId: request.id,
                 artifacts: result.artifacts,
-              });
-          await recordAgentEvent({
+              })
+            : [];
+          const response = await publishConversationMessage({
             ownerId: principal.principalId,
-            agentId,
+            id: replyId("reply"),
             conversationId,
-            actorType: "agent",
-            actorId: agentId,
-            eventType: "message.assistant",
-            payload: {
-              message: result.output,
-              requestId: request.requestId,
+            senderType: "agent",
+            senderId: agentId,
+            recipientType,
+            recipientId,
+            inReplyTo: request.id,
+            content: result.output,
+            metadata: {
               model: result.model,
               sessionId: result.sessionId,
               steps: result.steps,
               controlPlaneChanges: result.controlPlaneChanges,
               artifacts,
             },
+            artifacts: recipientType === "agent" ? result.artifacts : [],
           });
+          await markMessageDelivery(
+            principal.principalId,
+            request.id,
+            agentId,
+            "completed",
+          );
+          if (response.recipientType === "agent") {
+            await wakeMessage({ ownerId: principal.principalId, message: response });
+          }
           return {
             answer: result.output,
-            requestId: request.requestId,
+            requestId: request.id,
             model: result.model,
             steps: result.steps,
             controlPlaneChanges: result.controlPlaneChanges,
@@ -102,21 +143,45 @@ export default defineTool({
           };
         } catch (error) {
           ctx.abortSignal.throwIfAborted();
+          if (!await isMessageDeliveryPending(principal.principalId, request.id, agentId)) {
+            return {
+              answer: "Task stopped.",
+              requestId: request.id,
+              model: "unavailable",
+              steps: 0,
+              controlPlaneChanges: [],
+              failed: false,
+            };
+          }
           const diagnostic = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
           const answer =
             "The agent could not complete this request. Your message was preserved and can be retried safely.";
-          await recordAgentEvent({
+          const response = await publishConversationMessage({
             ownerId: principal.principalId,
-            agentId,
+            id: replyId("error"),
             conversationId,
-            actorType: "eve",
-            actorId: ctx.session.id,
-            eventType: "message.failed",
-            payload: { diagnostic, requestId: request.requestId },
+            senderType: "agent",
+            senderId: agentId,
+            recipientType,
+            recipientId,
+            kind: "error",
+            inReplyTo: request.id,
+            content: answer,
+            metadata: { diagnostic },
           });
+          await markMessageDelivery(
+            principal.principalId,
+            request.id,
+            agentId,
+            "failed",
+            diagnostic,
+          );
+          if (response.recipientType === "agent") {
+            await wakeMessage({ ownerId: principal.principalId, message: response });
+          }
           return {
             answer,
-            requestId: request.requestId,
+            requestId: request.id,
             model: "unavailable",
             steps: 0,
             controlPlaneChanges: [],

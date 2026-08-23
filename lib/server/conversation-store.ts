@@ -2,11 +2,16 @@ import { neon } from "@neondatabase/serverless";
 import { requireDatabaseUrl } from "@/lib/server/config";
 import { getAgent } from "@/lib/server/agent-store";
 import {
-  CONVERSATION_RUNTIME_VERSION,
-  visibleConversationSessionId,
-} from "@/lib/conversation-runtime";
-import { projectAgentTranscript, type AgentEventRow } from "@/lib/agent-transcript";
-import type { AgentMessage, AgentProfile, ConversationProfile, ConversationStatus } from "@/lib/types";
+  listConversationActivity as listMessageActivity,
+  listConversationTranscript,
+} from "@/lib/server/message-store";
+import type {
+  AgentMessage,
+  AgentProfile,
+  ConversationMessageActivity,
+  ConversationProfile,
+  ConversationStatus,
+} from "@/lib/types";
 
 interface ConversationRow {
   id: string;
@@ -27,15 +32,15 @@ function database() {
 const selectColumns = `
   c.id, c.agent_id, a.name AS agent_name,
   CASE WHEN c.title = 'New conversation' THEN COALESCE((
-    SELECT left(regexp_replace(event.payload->>'message', '[[:space:]]+', ' ', 'g'), 64)
-    FROM agent_events event
-    WHERE event.owner_id = c.owner_id
-      AND event.conversation_id = c.id
-      AND event.event_type = 'message.user'
-    ORDER BY event.created_at ASC
+    SELECT left(regexp_replace(message.content, '[[:space:]]+', ' ', 'g'), 64)
+    FROM conversation_messages message
+    WHERE message.owner_id = c.owner_id
+      AND message.conversation_id = c.id
+      AND message.sender_type = 'human'
+    ORDER BY message.created_at ASC
     LIMIT 1
   ), c.title) ELSE c.title END AS title,
-  c.eve_session_id,
+  a.eve_session_id,
   c.runtime_version, c.status, c.created_at, c.updated_at
 `;
 
@@ -45,7 +50,7 @@ function toConversation(row: ConversationRow): ConversationProfile {
     agentId: row.agent_id,
     agentName: row.agent_name,
     title: row.title,
-    eveSessionId: visibleConversationSessionId(row.runtime_version, row.eve_session_id),
+    eveSessionId: row.eve_session_id,
     status: row.status,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
@@ -57,7 +62,7 @@ export async function listConversations(ownerId: string): Promise<ConversationPr
     `SELECT ${selectColumns}
      FROM conversations c
      JOIN agents a ON a.id = c.agent_id
-     WHERE c.owner_id = $1
+     WHERE c.owner_id = $1 AND c.visibility = 'user'
      ORDER BY c.updated_at DESC, c.created_at DESC`,
     [ownerId],
   );
@@ -75,9 +80,9 @@ export async function createConversation(
   const rows = await database().query(
     `INSERT INTO conversations (id, owner_id, agent_id)
      VALUES ($1, $2, $3)
-     RETURNING id, agent_id, $4::text AS agent_name, title, eve_session_id,
+     RETURNING id, agent_id, $4::text AS agent_name, title, $5::text AS eve_session_id,
        runtime_version, status, created_at, updated_at`,
-    [id, ownerId, agentId, agent.name],
+    [id, ownerId, agentId, agent.name, agent.eveSessionId],
   );
   return toConversation(rows[0] as ConversationRow);
 }
@@ -97,6 +102,80 @@ export async function deleteConversation(ownerId: string, conversationId: string
     [ownerId, conversationId],
   );
   if (!rows[0]) throw new Error("Conversation not found");
+}
+
+export interface ConversationStopTarget {
+  agentId: string;
+  eveSessionId: string;
+}
+
+export async function stopConversation(
+  ownerId: string,
+  conversationId: string,
+): Promise<{
+  conversation: ConversationProfile;
+  stoppedDeliveryCount: number;
+  targets: ConversationStopTarget[];
+}> {
+  const sql = database();
+  const targetRows = await sql.query(
+    `SELECT DISTINCT agent.id AS agent_id, agent.eve_session_id
+     FROM conversation_messages message
+     JOIN message_deliveries delivery
+       ON delivery.owner_id = message.owner_id AND delivery.message_id = message.id
+     JOIN agents agent
+       ON agent.owner_id = message.owner_id AND agent.id = delivery.recipient_id
+     WHERE message.owner_id = $1 AND message.conversation_id = $2
+       AND delivery.recipient_type = 'agent'
+       AND delivery.state = 'claimed'
+       AND agent.eve_session_id IS NOT NULL`,
+    [ownerId, conversationId],
+  );
+  const rows = await sql.query(
+    `WITH target AS (
+       SELECT id FROM conversations WHERE owner_id = $1 AND id = $2
+     ), stopped AS (
+       UPDATE message_deliveries delivery
+       SET state = 'failed', error = 'Stopped by user', completed_at = now()
+       FROM conversation_messages message, target
+       WHERE delivery.owner_id = $1
+         AND message.owner_id = delivery.owner_id
+         AND message.id = delivery.message_id
+         AND message.conversation_id = target.id
+         AND delivery.recipient_type = 'agent'
+         AND delivery.state IN ('queued', 'dispatched', 'claimed')
+       RETURNING delivery.id
+     ), updated AS (
+       UPDATE conversations conversation
+       SET status = CASE
+           WHEN EXISTS (SELECT 1 FROM stopped) THEN 'failed'
+           ELSE conversation.status
+         END,
+         updated_at = CASE
+           WHEN EXISTS (SELECT 1 FROM stopped) THEN now()
+           ELSE conversation.updated_at
+         END
+       FROM target
+       WHERE conversation.owner_id = $1 AND conversation.id = target.id
+       RETURNING conversation.id
+     )
+     SELECT id, (SELECT count(*)::int FROM stopped) AS stopped_count
+     FROM updated`,
+    [ownerId, conversationId],
+  );
+  if (!rows[0]) throw new Error("Conversation not found");
+  const conversation = await getConversation(ownerId, conversationId);
+  if (!conversation) throw new Error("Conversation not found");
+  return {
+    conversation,
+    stoppedDeliveryCount: Number(
+      (rows[0] as { stopped_count?: unknown }).stopped_count ?? 0,
+    ),
+    targets: targetRows.map((row) => ({
+      agentId: String(row.agent_id),
+      eveSessionId: String(row.eve_session_id),
+    })),
+  };
 }
 
 export async function ensureConversation(
@@ -122,61 +201,18 @@ export async function getConversation(
   return rows[0] ? toConversation(rows[0] as ConversationRow) : undefined;
 }
 
-export async function claimConversationSession(input: {
-  ownerId: string;
-  conversationId: string;
-  agentId: string;
-  eveSessionId: string;
-}): Promise<{ agent: AgentProfile; conversation: ConversationProfile }> {
-  const rows = await database().query(
-    `UPDATE conversations c SET
-       eve_session_id = CASE
-         WHEN c.runtime_version = $5 THEN COALESCE(c.eve_session_id, $4)
-         ELSE $4
-       END,
-       runtime_version = $5,
-       updated_at = CASE
-         WHEN c.eve_session_id IS NULL OR c.runtime_version <> $5 THEN now()
-         ELSE c.updated_at
-       END
-     FROM agents a
-     WHERE c.owner_id = $1 AND c.id = $2 AND c.agent_id = $3
-       AND a.id = c.agent_id AND a.owner_id = c.owner_id AND a.enabled = true
-       AND (
-         c.runtime_version <> $5 OR c.eve_session_id IS NULL OR c.eve_session_id = $4
-       )
-     RETURNING c.id, c.agent_id, a.name AS agent_name, c.title, c.eve_session_id,
-       c.runtime_version, c.status, c.created_at, c.updated_at`,
-    [
-      input.ownerId,
-      input.conversationId,
-      input.agentId,
-      input.eveSessionId,
-      CONVERSATION_RUNTIME_VERSION,
-    ],
-  );
-  if (!rows[0]) throw new Error("Conversation is unavailable or bound to another Eve session");
-  const agent = await getAgent(input.ownerId, input.agentId);
-  if (!agent) throw new Error("Agent not found");
-  return { agent, conversation: toConversation(rows[0] as ConversationRow) };
-}
-
 export async function listConversationMessages(
   ownerId: string,
   conversationId: string,
   limit = 200,
 ): Promise<AgentMessage[]> {
-  const rows = await database().query(
-    `SELECT id, event_type, payload, created_at FROM (
-       SELECT id, event_type, payload, created_at
-       FROM agent_events
-       WHERE owner_id = $1 AND conversation_id = $2
-         AND event_type IN ('message.user', 'message.assistant', 'message.failed')
-       ORDER BY created_at DESC
-       LIMIT $3
-     ) recent
-     ORDER BY created_at ASC`,
-    [ownerId, conversationId, Math.min(500, Math.max(1, limit))],
-  );
-  return projectAgentTranscript(rows as AgentEventRow[]);
+  return listConversationTranscript(ownerId, conversationId, limit);
+}
+
+export async function listConversationActivity(
+  ownerId: string,
+  conversationId: string,
+  limit = 300,
+): Promise<ConversationMessageActivity[]> {
+  return listMessageActivity(ownerId, conversationId, limit);
 }

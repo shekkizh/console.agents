@@ -3,13 +3,15 @@ import { neon } from "@neondatabase/serverless";
 import { Client } from "eve/client";
 import type { AgentProfile, ConversationProfile } from "../../lib/types";
 import { E2E_BASE_URL, E2E_OWNER_ID, E2E_TOKEN } from "./constants";
+import { requireDatabaseUrl } from "../../lib/server/config";
+import { publishConversationMessage } from "../../lib/server/message-store";
+import { wakeMessage } from "../../lib/server/message-runtime";
 
-const firstPrompt = "E2E_FAKE delay=5000 reply=E2E_ALPHA";
+const firstPrompt = "E2E_FAKE delay=15000 reply=E2E_ALPHA";
 const secondPrompt = "E2E_FAKE delay=10 reply=E2E_BETA";
 
 function database() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required for browser tests");
-  return neon(process.env.DATABASE_URL);
+  return neon(requireDatabaseUrl());
 }
 
 async function clearE2ERows() {
@@ -43,7 +45,7 @@ test("queues overlapping messages and finishes after the browser leaves", async 
   await expect(
     page.locator("article.message.user .message-copy").getByText(firstPrompt, { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Working in the sandbox", { exact: true })).toBeVisible();
+  await expect(page.getByText("Working", { exact: true })).toBeVisible();
 
   await composer.fill(secondPrompt);
   await expect(send).toBeEnabled();
@@ -57,8 +59,9 @@ test("queues overlapping messages and finishes after the browser leaves", async 
     .poll(async () => {
       const rows = await sql.query(
         `SELECT count(*)::int AS count
-         FROM agent_events
-         WHERE owner_id = $1 AND event_type = 'message.user'`,
+         FROM conversation_messages
+         WHERE owner_id = $1
+           AND sender_type = 'human' AND recipient_type = 'agent'`,
         [E2E_OWNER_ID],
       );
       return rows[0]?.count;
@@ -71,9 +74,11 @@ test("queues overlapping messages and finishes after the browser leaves", async 
     .poll(
       async () => {
         const rows = await sql.query(
-          `SELECT payload->>'message' AS message
-           FROM agent_events
-           WHERE owner_id = $1 AND event_type = 'message.assistant'
+          `SELECT content AS message
+           FROM conversation_messages
+           WHERE owner_id = $1
+             AND sender_type = 'agent' AND recipient_type = 'human'
+             AND kind = 'message'
            ORDER BY created_at ASC, id ASC`,
           [E2E_OWNER_ID],
         );
@@ -84,12 +89,17 @@ test("queues overlapping messages and finishes after the browser leaves", async 
     .toEqual(["E2E_ALPHA", "E2E_BETA"]);
 
   const persistedRows = await sql.query(
-    `SELECT id, agent_id, runtime_version, status, eve_session_id,
-       (SELECT count(*)::int FROM agent_events
-        WHERE owner_id = $1 AND event_type = 'message.user') AS user_count,
-       (SELECT count(*)::int FROM agent_events
-        WHERE owner_id = $1 AND event_type IN ('message.assistant', 'message.failed')) AS terminal_count
-     FROM conversations WHERE owner_id = $1`,
+    `SELECT conversation.id, conversation.agent_id, conversation.runtime_version,
+       conversation.status, agent.eve_session_id,
+       (SELECT count(*)::int FROM conversation_messages
+        WHERE owner_id = $1
+          AND sender_type = 'human' AND recipient_type = 'agent') AS user_count,
+       (SELECT count(*)::int FROM conversation_messages
+        WHERE owner_id = $1
+          AND sender_type = 'agent' AND recipient_type = 'human') AS terminal_count
+     FROM conversations conversation
+     JOIN agents agent ON agent.id = conversation.agent_id
+     WHERE conversation.owner_id = $1`,
     [E2E_OWNER_ID],
   );
   assertPersistedConversation(persistedRows[0]);
@@ -125,6 +135,164 @@ test("queues overlapping messages and finishes after the browser leaves", async 
     })
     .toEqual({ terminalTurns: 2, tail: "session.waiting" });
   await context.close();
+});
+
+test("recovers an inactive durable session without duplicating the mailbox request", async ({
+  page,
+  request,
+}) => {
+  const agentsResponse = await request.get("/api/agents");
+  expect(agentsResponse.status()).toBe(200);
+  const agent = ((await agentsResponse.json()) as { agents: AgentProfile[] }).agents[0]!;
+  const staleSessionId = "wrun_stale_client_recovery";
+  const sql = database();
+  await sql.query(
+    "UPDATE agents SET eve_session_id = $3 WHERE owner_id = $1 AND id = $2",
+    [E2E_OWNER_ID, agent.id, staleSessionId],
+  );
+
+  await page.goto("/");
+  const prompt = "E2E_FAKE delay=10 reply=STALE_SESSION_RECOVERED";
+  await page.getByRole("textbox", { name: "Message General" }).fill(prompt);
+  await page.getByRole("button", { name: "Send message" }).click();
+
+  await expect(
+    page.locator("article.message.assistant:not(.pending) .message-copy"),
+  ).toHaveText(["STALE_SESSION_RECOVERED"]);
+  await expect(
+    page.locator("article.message.user .message-copy").getByText(prompt, { exact: true }),
+  ).toHaveCount(1);
+  await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+
+  const rows = await sql.query(
+    `SELECT agent.eve_session_id,
+       (SELECT count(*)::int FROM conversation_messages message
+        WHERE message.owner_id = $1 AND message.conversation_id = conversation.id
+          AND message.sender_type = 'human' AND message.recipient_type = 'agent') AS user_count,
+       (SELECT count(*)::int FROM conversation_messages message
+        WHERE message.owner_id = $1 AND message.conversation_id = conversation.id
+          AND message.sender_type = 'agent' AND message.recipient_type = 'human'
+          AND message.kind = 'message') AS assistant_count
+     FROM conversations conversation
+     JOIN agents agent ON agent.owner_id = conversation.owner_id
+       AND agent.id = conversation.agent_id
+     WHERE conversation.owner_id = $1
+     LIMIT 1`,
+    [E2E_OWNER_ID],
+  );
+  expect(rows[0]).toEqual({
+    eve_session_id: expect.any(String),
+    user_count: 1,
+    assistant_count: 1,
+  });
+  expect(rows[0]?.eve_session_id).not.toBe(staleSessionId);
+});
+
+test("accepts a signed message wakeup in the existing conversation", async ({
+  page,
+  request,
+}) => {
+  const agentsResponse = await request.get("/api/agents");
+  expect(agentsResponse.status()).toBe(200);
+  const sender = ((await agentsResponse.json()) as { agents: AgentProfile[] }).agents[0]!;
+  const recipientResponse = await request.post("/api/agents", {
+    data: {
+      name: "Message Receiver",
+      specialty: "Receives autonomous work",
+      instructions: "Process incoming work independently.",
+    },
+  });
+  expect(recipientResponse.status()).toBe(201);
+  const recipient = (await recipientResponse.json()) as AgentProfile;
+  const staleRecipientSessionId = "wrun_stale_message_recovery";
+  await database().query(
+    "UPDATE agents SET eve_session_id = $3 WHERE owner_id = $1 AND id = $2",
+    [E2E_OWNER_ID, recipient.id, staleRecipientSessionId],
+  );
+  const conversationResponse = await request.post("/api/conversations", {
+    data: { agentId: sender.id },
+  });
+  expect(conversationResponse.status()).toBe(201);
+  const conversation = (await conversationResponse.json()) as ConversationProfile;
+
+  const message = await publishConversationMessage({
+    ownerId: E2E_OWNER_ID,
+    id: "e2e-signed-message-wake",
+    conversationId: conversation.id,
+    senderType: "system",
+    senderId: "e2e-system",
+    recipientType: "agent",
+    recipientId: recipient.id,
+    content: "E2E_FAKE delay=10 reply=MESSAGE_WAKE_OK",
+  });
+  await wakeMessage({ ownerId: E2E_OWNER_ID, message });
+
+  const sql = database();
+  await expect.poll(async () => {
+    const rows = await sql.query(
+      `SELECT content
+       FROM conversation_messages
+       WHERE owner_id = $1 AND conversation_id = $2
+         AND sender_type = 'agent' AND sender_id = $3
+         AND recipient_type = 'human' AND in_reply_to = $4
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [E2E_OWNER_ID, conversation.id, recipient.id, message.id],
+    );
+    return rows[0]?.content;
+  }).toBe("MESSAGE_WAKE_OK");
+
+  const deliveryRows = await sql.query(
+    `SELECT delivery.state, message.conversation_id, agent.eve_session_id
+     FROM message_deliveries delivery
+     JOIN conversation_messages message
+       ON message.owner_id = delivery.owner_id
+      AND message.id = delivery.message_id
+     JOIN agents agent
+       ON agent.owner_id = message.owner_id
+      AND agent.id = message.recipient_id
+     WHERE delivery.owner_id = $1 AND delivery.message_id = $2`,
+    [E2E_OWNER_ID, message.id],
+  );
+  expect(deliveryRows[0]).toEqual({
+    state: "completed",
+    conversation_id: conversation.id,
+    eve_session_id: expect.any(String),
+  });
+  expect(deliveryRows[0]?.eve_session_id).not.toBe(staleRecipientSessionId);
+
+  const conversationRows = await sql.query(
+    "SELECT count(*)::int AS count FROM conversations WHERE owner_id = $1",
+    [E2E_OWNER_ID],
+  );
+  expect(conversationRows[0]?.count).toBe(1);
+
+  const detailResponse = await request.get("/api/conversations/" + conversation.id);
+  expect(detailResponse.status()).toBe(200);
+  const detail = (await detailResponse.json()) as {
+    activity: Array<Record<string, unknown>>;
+  };
+  expect(detail.activity).toContainEqual(expect.objectContaining({
+    id: message.id,
+    senderName: "System",
+    recipientName: recipient.name,
+    state: "completed",
+  }));
+  expect(detail.activity).toContainEqual(expect.objectContaining({
+    senderId: recipient.id,
+    recipientName: "You",
+    inReplyTo: message.id,
+    content: "MESSAGE_WAKE_OK",
+  }));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Activity" }).click();
+  const loggedMessage = page.locator("article").filter({
+    hasText: "E2E_FAKE delay=10 reply=MESSAGE_WAKE_OK",
+  });
+  await expect(loggedMessage).toContainText("System");
+  await expect(loggedMessage).toContainText(recipient.name);
+  await expect(loggedMessage).toContainText("Delivered");
 });
 
 test("deletes conversations and moves a deleted agent's conversation to General", async ({ browser }) => {
