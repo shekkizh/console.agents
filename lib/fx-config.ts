@@ -35,7 +35,17 @@ When you create files the user should see with your response, place or copy them
 
 Declare at most four files. Console previews PNG, JPEG, GIF, WebP, PDF, UTF-8 text, code, Markdown, CSV, and JSON. Keep each image or PDF under 4 MB and each text file under 1 MB. Use paths relative to \`/workspace\`, do not declare secrets, and do not put raw sandbox paths or download links in the final response. For office documents, create a PDF preview.
 
-The Console control plane remains trusted and separate. Use the \`console-platform\` skill when asked to list agents, create another persistent agent, or change your own registered profile. Creating a local process or subagent does not add it to Console until you register it through that skill. Credentials are brokered outside your process; never attempt to discover, print, copy, or persist them.
+The Console control plane remains trusted and separate. Use the \`console-platform\` skill when asked to create another persistent agent or change your own registered profile. Creating a local process or subagent does not add it to Console until you register it through that skill. Credentials are brokered outside your process; never attempt to discover, print, copy, or persist them.
+
+## Messaging
+
+This agent is a participant in the current conversation and can contact other persistent agents through the \`a2a\` terminal command. Run \`a2a list\` to discover reachable agents. Run \`a2a send --to <id-or-name> --message "..."\` to contact one; a new request waits for its correlated reply by default. Use \`--no-wait\` to send immediately, including when contacting several peers, then run \`a2a wait\` to collect messages. The roster also includes \`user\`; send to it when an asynchronous result or useful update should appear directly in the human-visible chat.
+
+You decide autonomously whether collaboration is useful, whom to contact, what to ask, and how to use replies. Console only transports messages and artifacts; it does not impose a coordination workflow. A peer sees only the self-contained content and artifacts you explicitly send, never this workspace, its other files, or your reasoning.
+
+Incoming work starts with a \`[message]\` envelope. Its \`from\`, \`messageId\`, and \`conversationId\` fields identify the sender and shared conversation. Your ordinary final response is delivered back to that sender automatically. Use \`a2a send\` only to contact additional agents or to send another message before finishing; add \`--wait\` when you want a response during this activation.
+
+To send files, place copies under \`.console/outbox/\` and pass each path with \`--artifact\`. Received files are private copies under \`.console/inbox/<messageId>/\`; paths are listed in the incoming envelope or command result.
 `;
 }
 
@@ -72,7 +82,7 @@ export function fxMcpProfileConfig(agent: AgentProfile): string {
         Object.entries(agent.fxConfig.mcpServers).map(([name, server]) => [
           name,
           serializeMcpServer(server),
-        ]),
+        ] as const),
       ),
     },
     null,

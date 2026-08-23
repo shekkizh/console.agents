@@ -4,7 +4,10 @@ import type { FxTurnOutcome } from "@/lib/server/fx-runtime";
 const fakeRequestPattern = /^E2E_FAKE delay=(\d{1,5}) reply=([A-Za-z0-9_-]{1,100})$/;
 
 export function parseE2EFakeRequest(prompt: string): { delayMs: number; reply: string } {
-  const match = fakeRequestPattern.exec(prompt);
+  const payload = prompt.startsWith("[message]\n")
+    ? prompt.slice(prompt.indexOf("\n\n") + 2)
+    : prompt;
+  const match = fakeRequestPattern.exec(payload);
   if (!match) throw new Error("Invalid E2E fake fx request");
   return { delayMs: Number(match[1]), reply: match[2]! };
 }

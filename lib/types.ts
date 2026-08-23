@@ -75,6 +75,30 @@ export interface ConversationProfile {
   updatedAt: string;
 }
 
+export type MessageDeliveryState =
+  | "queued"
+  | "dispatched"
+  | "claimed"
+  | "completed"
+  | "failed";
+
+export interface ConversationMessageActivity {
+  id: string;
+  senderType: "human" | "agent" | "system";
+  senderId: string;
+  senderName: string;
+  recipientType: "human" | "agent";
+  recipientId: string;
+  recipientName: string;
+  kind: "message" | "error" | "tick";
+  inReplyTo: string | null;
+  content: string;
+  summary: string | null;
+  state: MessageDeliveryState;
+  artifactCount: number;
+  createdAt: string;
+}
+
 export interface FxAskResult {
   output: string;
   exitCode: number;

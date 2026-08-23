@@ -1,5 +1,6 @@
 import type { RuntimeSandboxSession, SandboxSession } from "eve/sandbox";
 import { z } from "zod";
+import { a2aCliSource, A2A_CLI_PATH, A2A_CLI_SOURCE_PATH } from "@/lib/a2a-cli";
 import { optionalFxCapabilitiesSchema } from "@/lib/agent-capabilities";
 import {
   fxAgentInstructions,
@@ -16,7 +17,9 @@ import {
   listAgents,
   updateAgent,
 } from "@/lib/server/agent-store";
-import { config, requireAiGatewayApiKey } from "@/lib/server/config";
+import { createAgentMessageToken } from "@/lib/server/message-auth";
+import { config, consoleAgentApiUrl, requireAiGatewayApiKey } from "@/lib/server/config";
+import { materializeMessageArtifacts } from "@/lib/server/message-runtime";
 import {
   activeFxNetworkPolicy,
   idleFxNetworkPolicy,
@@ -31,7 +34,7 @@ import {
 } from "@/lib/server/artifact-capture";
 
 export const FX_BINARY_PATH = "/workspace/.console/bin/fx";
-const FX_SESSION_PATH = ".console/fx-session-id";
+const FX_SESSION_DIRECTORY = ".console/fx-sessions";
 const CONTROL_PATH = ".console/control-plane.json";
 
 const controlRequestSchema = z.discriminatedUnion("type", [
@@ -143,11 +146,20 @@ async function syncFxCapabilities(sandbox: SandboxSession, agent: AgentProfile):
 
 async function ensureFxInstalled(sandbox: SandboxSession): Promise<void> {
   const probe = await sandbox.run({ command: `test -x ${FX_BINARY_PATH}` });
-  if (probe.exitCode === 0) return;
-  const install = await sandbox.run({ command: fxInstallCommand() });
-  if (install.exitCode !== 0) {
-    throw new Error(`Unable to install fx ${config.fxVersion}: ${install.stderr.slice(0, 500)}`);
+  if (probe.exitCode !== 0) {
+    const install = await sandbox.run({ command: fxInstallCommand() });
+    if (install.exitCode !== 0) {
+      throw new Error(`Unable to install fx ${config.fxVersion}: ${install.stderr.slice(0, 500)}`);
+    }
   }
+  await sandbox.writeTextFile({
+    path: A2A_CLI_SOURCE_PATH,
+    content: a2aCliSource(),
+  });
+  const executable = await sandbox.run({
+    command: `install -m 0755 /workspace/${A2A_CLI_SOURCE_PATH} /workspace/${A2A_CLI_PATH}`,
+  });
+  if (executable.exitCode !== 0) throw new Error("Unable to install agent messaging command");
 }
 
 export async function syncFxAgentConfig(
@@ -255,7 +267,10 @@ export interface FxTurnOutcome extends FxAskResult {
 export async function runFxTurn(input: {
   ownerId: string;
   agent: AgentProfile;
+  conversationId: string;
   prompt: string;
+  incomingMessageId?: string;
+  incomingFromAgentId?: string;
   sandbox: RuntimeSandboxSession;
   abortSignal?: AbortSignal;
 }): Promise<FxTurnOutcome> {
@@ -263,9 +278,17 @@ export async function runFxTurn(input: {
   const roster = await listAgents(input.ownerId);
   await syncFxAgentConfig(input.sandbox, input.agent, roster);
 
+  if (!/^conversation-[A-Za-z0-9-]+$/.test(input.conversationId)) {
+    throw new Error("Invalid conversation id");
+  }
+  const sessionDirectory = await input.sandbox.run({
+    command: `mkdir -p /workspace/${FX_SESSION_DIRECTORY}`,
+  });
+  if (sessionDirectory.exitCode !== 0) throw new Error("Unable to prepare FX sessions");
+  const fxSessionPath = `${FX_SESSION_DIRECTORY}/${input.conversationId}.id`;
   let storedSession: string | null = null;
   try {
-    storedSession = await input.sandbox.readTextFile({ path: FX_SESSION_PATH });
+    storedSession = await input.sandbox.readTextFile({ path: fxSessionPath });
   } catch {
     storedSession = null;
   }
@@ -279,8 +302,15 @@ export async function runFxTurn(input: {
   ]);
 
   const resume = previousSession ? '--resume-id "$FX_RESUME_ID"' : "";
-  const command = `cd /workspace && prompt="$(cat .console/prompt.txt)" && exec ${FX_BINARY_PATH} ask --json --yolo ${resume} -- "$prompt"`;
+  const command = `export PATH="/workspace/.console/bin:$PATH" && cd /workspace && prompt="$(cat .console/prompt.txt)" && exec ${FX_BINARY_PATH} ask --json --yolo ${resume} -- "$prompt"`;
   const stopAfterTurn = stopsFxSandboxAfterTurn();
+  const messageToken = createAgentMessageToken({
+    ownerId: input.ownerId,
+    agentId: input.agent.id,
+    conversationId: input.conversationId,
+    incomingMessageId: input.incomingMessageId,
+    incomingFromAgentId: input.incomingFromAgentId,
+  });
 
   try {
     await input.sandbox.setNetworkPolicy(
@@ -289,11 +319,19 @@ export async function runFxTurn(input: {
         input.agent.fxConfig.networkAllowlist,
       ),
     );
+    if (input.incomingMessageId) {
+      await materializeMessageArtifacts(
+        { ownerId: input.ownerId, sandbox: input.sandbox },
+        input.incomingMessageId,
+      );
+    }
     const run = await input.sandbox.run({
       command,
       abortSignal: input.abortSignal,
       env: {
         AI_GATEWAY_API_KEY: requireAiGatewayApiKey(),
+        CONSOLE_A2A_TOKEN: messageToken,
+        CONSOLE_A2A_URL: consoleAgentApiUrl(),
         FX_MODEL: input.agent.fxConfig.model,
         FX_RESUME_ID: previousSession ?? "",
       },
@@ -302,7 +340,7 @@ export async function runFxTurn(input: {
     if (run.exitCode !== 0 || result.exitCode !== 0) {
       throw new Error(result.output || run.stderr.slice(0, 1_000) || `fx exited ${run.exitCode}`);
     }
-    await input.sandbox.writeTextFile({ path: FX_SESSION_PATH, content: `${result.sessionId}\n` });
+    await input.sandbox.writeTextFile({ path: fxSessionPath, content: `${result.sessionId}\n` });
     const control = await applyControlRequests(input);
     if (control.currentAgent.configVersion !== input.agent.configVersion) {
       await syncFxAgentConfig(input.sandbox, control.currentAgent, await listAgents(input.ownerId));

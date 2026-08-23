@@ -22,16 +22,25 @@ test("allows unrestricted egress in full mode", () => {
   assert.equal(activeFxNetworkPolicy("full"), "allow-all");
 });
 
-test("keeps only the model connection in none mode", () => {
-  const policy = activeFxNetworkPolicy("none");
+test("keeps only the model and mailbox connections in none mode", () => {
+  const policy = activeFxNetworkPolicy("none", [], "host.microsandbox.internal");
   const allow = allowMap(policy);
-  assert.deepEqual(Object.keys(allow), ["ai-gateway.vercel.sh"]);
+  assert.deepEqual(Object.keys(allow), ["ai-gateway.vercel.sh", "host.microsandbox.internal"]);
 });
 
 test("adds configured domains in allowlist mode", () => {
-  const policy = activeFxNetworkPolicy("allowlist", ["github.com", "*.npmjs.org"]);
+  const policy = activeFxNetworkPolicy(
+    "allowlist",
+    ["github.com", "*.npmjs.org"],
+    "host.microsandbox.internal",
+  );
   const allow = allowMap(policy);
-  assert.deepEqual(Object.keys(allow), ["ai-gateway.vercel.sh", "github.com", "*.npmjs.org"]);
+  assert.deepEqual(Object.keys(allow), [
+    "ai-gateway.vercel.sh",
+    "host.microsandbox.internal",
+    "github.com",
+    "*.npmjs.org",
+  ]);
 });
 
 test("normalizes and validates allowlist domains", () => {

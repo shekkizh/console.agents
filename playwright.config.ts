@@ -6,6 +6,9 @@ import {
   E2E_TOKEN,
 } from "./tests/e2e/constants";
 
+process.env.CONSOLE_INTERNAL_SECRET ??= E2E_TOKEN;
+process.env.CONSOLE_INTERNAL_URL ??= E2E_BASE_URL;
+
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
@@ -27,6 +30,8 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       E2E_TEST_MODE: "1",
+      CONSOLE_INTERNAL_SECRET: E2E_TOKEN,
+      CONSOLE_INTERNAL_URL: E2E_BASE_URL,
       E2E_FAKE_FX: "1",
       E2E_TEST_OWNER_ID: E2E_OWNER_ID,
       E2E_TEST_TOKEN: E2E_TOKEN,

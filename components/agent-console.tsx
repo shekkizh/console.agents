@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth, UserButton } from "@clerk/nextjs";
-import { Client } from "eve/client";
+import { Client, ClientError } from "eve/client";
 import { useEveAgent } from "eve/react";
 import {
   createContext,
@@ -15,6 +15,7 @@ import {
   useState,
 } from "react";
 import {
+  ArrowRightIcon,
   ChevronDownIcon,
   CircleIcon,
   ExternalLinkIcon,
@@ -23,12 +24,15 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   Maximize2Icon,
+  MessagesSquareIcon,
   MoonIcon as LucideMoonIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PlusIcon as LucidePlusIcon,
+  RefreshCwIcon,
   SendIcon as LucideSendIcon,
   Settings2Icon,
+  SquareIcon,
   SparklesIcon,
   SunIcon as LucideSunIcon,
   Trash2Icon,
@@ -84,7 +88,14 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import type { AgentArtifact, AgentMessage, AgentProfile, ConversationProfile, FxNetworkAccess } from "@/lib/types";
+import type {
+  AgentArtifact,
+  AgentMessage,
+  AgentProfile,
+  ConversationMessageActivity,
+  ConversationProfile,
+  FxNetworkAccess,
+} from "@/lib/types";
 
 interface TranscriptEntry {
   id: string;
@@ -191,28 +202,6 @@ function SiteSettings() {
   );
 }
 
-function mergeTranscript(saved: readonly AgentMessage[], live: readonly TranscriptEntry[]) {
-  const merged: TranscriptEntry[] = saved.map(({ id, role, text, artifacts, failed }) => ({
-    id,
-    role,
-    text,
-    artifacts,
-    failed,
-  }));
-  const savedCounts = new Map<string, number>();
-  for (const entry of saved) {
-    const key = `${entry.role}\u0000${entry.text}`;
-    savedCounts.set(key, (savedCounts.get(key) ?? 0) + 1);
-  }
-  for (const entry of live) {
-    const key = `${entry.role}\u0000${entry.text}`;
-    const remaining = savedCounts.get(key) ?? 0;
-    if (remaining > 0) savedCounts.set(key, remaining - 1);
-    else merged.push(entry);
-  }
-  return merged;
-}
-
 function preserveConversationTitle(
   updated: ConversationProfile,
   existing: ConversationProfile | undefined,
@@ -220,15 +209,6 @@ function preserveConversationTitle(
   return existing && updated.title === "New conversation" && existing.title !== "New conversation"
     ? { ...updated, title: existing.title }
     : updated;
-}
-
-function isInternalNotification(text: string): boolean {
-  return (
-    text === "__CONSOLE_MAILBOX_IDLE__" ||
-    /^Background task task_[A-Za-z0-9]+ \(send_message\) is (?:completed|failed|cancelled)\./.test(
-      text,
-    )
-  );
 }
 
 async function readError(response: Response): Promise<string> {
@@ -397,6 +377,63 @@ function ArtifactPreviews({ artifacts }: { artifacts: readonly AgentArtifact[] }
   );
 }
 
+function activityStateLabel(state: ConversationMessageActivity["state"]): string {
+  return state === "completed"
+    ? "Delivered"
+    : state === "failed"
+      ? "Failed"
+      : state === "claimed"
+        ? "Received"
+        : state === "dispatched"
+          ? "Activated"
+          : "Queued";
+}
+
+function ConversationActivityLog({
+  messages,
+}: {
+  messages: readonly ConversationMessageActivity[];
+}) {
+  return (
+    <div className="scrollbar-thin min-h-0 overflow-y-auto">
+      <div className="mx-auto grid w-full max-w-5xl gap-3 px-4 py-6 sm:px-6 sm:py-8">
+        {messages.length === 0 ? (
+          <div className="flex min-h-[50dvh] flex-col items-center justify-center text-center">
+            <div className="mb-4 flex size-12 items-center justify-center rounded-2xl border bg-card">
+              <MessagesSquareIcon className="size-5 text-muted-foreground" />
+            </div>
+            <h2 className="text-base font-semibold">No activity yet</h2>
+            <p className="mt-1 max-w-sm text-sm leading-6 text-muted-foreground">
+              Human and agent messages for this conversation appear here.
+            </p>
+          </div>
+        ) : messages.map((message) => (
+          <article className="rounded-2xl border bg-card p-4 shadow-sm sm:p-5" key={message.id}>
+            <div className="flex flex-wrap items-center gap-2">
+              <strong className="text-sm">{message.senderName}</strong>
+              <ArrowRightIcon className="size-3.5 text-muted-foreground" />
+              <strong className="text-sm">{message.recipientName}</strong>
+              <Badge className="ml-auto" variant={message.state === "failed" ? "destructive" : message.state === "queued" ? "secondary" : "outline"}>
+                {activityStateLabel(message.state)}
+              </Badge>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {new Date(message.createdAt).toLocaleString()}
+            </p>
+            {message.summary ? <p className="mt-3 text-xs font-medium text-muted-foreground">{message.summary}</p> : null}
+            <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>
+            <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-t pt-3 font-mono text-[10px] text-muted-foreground">
+              <span title={message.id}>message {message.id.slice(0, 8)}</span>
+              {message.inReplyTo ? <span title={message.inReplyTo}>reply to {message.inReplyTo.slice(0, 8)}</span> : null}
+              {message.artifactCount > 0 ? <span>{message.artifactCount} attachment{message.artifactCount === 1 ? "" : "s"}</span> : null}
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AgentChat({
   agent,
   conversation,
@@ -417,25 +454,37 @@ function AgentChat({
   const getToken = useConsoleToken();
   const [draft, setDraft] = useState("");
   const [localError, setLocalError] = useState<string>();
+  const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [savedMessages, setSavedMessages] = useState<AgentMessage[]>([]);
+  const [activity, setActivity] = useState<ConversationMessageActivity[]>([]);
+  const [conversationTab, setConversationTab] = useState<"chat" | "activity">("chat");
   const refreshMessages = useCallback(async () => {
     const response = await fetch(`/api/conversations/${conversation.id}`, { cache: "no-store" });
-    if (!response.ok) return;
+    if (!response.ok) return false;
     const body = (await response.json()) as {
       conversation: ConversationProfile;
       messages: AgentMessage[];
+      activity: ConversationMessageActivity[];
     };
     setSavedMessages(body.messages);
+    setActivity(body.activity);
     onConversationUpdate(body.conversation);
+    return true;
   }, [conversation.id, onConversationUpdate]);
   useEffect(() => {
     let ignore = false;
     void fetch(`/api/conversations/${conversation.id}`, { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : undefined))
-      .then((body: { conversation: ConversationProfile; messages: AgentMessage[] } | undefined) => {
+      .then((body: {
+        conversation: ConversationProfile;
+        messages: AgentMessage[];
+        activity: ConversationMessageActivity[];
+      } | undefined) => {
         if (!ignore && body) {
           setSavedMessages(body.messages);
+          setActivity(body.activity);
           onConversationUpdate(body.conversation);
         }
       });
@@ -458,38 +507,17 @@ function AgentChat({
       void refreshMessages();
     },
   });
-  const liveEntries = useMemo<TranscriptEntry[]>(
-    () =>
-      eve.data.messages.flatMap((message) => {
-        if (message.role !== "user" && message.role !== "assistant") return [];
-        const text = message.parts
-          .filter((part) => part.type === "text")
-          .map((part) => part.text)
-          .join("\n")
-          .trim();
-        return text && !isInternalNotification(text)
-          ? [
-              {
-                id: message.id,
-                role: message.role,
-                text,
-                artifacts: [],
-                failed: message.metadata?.status === "failed",
-              },
-            ]
-          : [];
-      }),
-    [eve.data.messages],
-  );
-  const entries = useMemo(
-    () => mergeTranscript(savedMessages, liveEntries),
-    [liveEntries, savedMessages],
+  const entries = useMemo<TranscriptEntry[]>(
+    () => savedMessages.map(({ id, role, text, artifacts, failed }) => ({
+      id, role, text, artifacts, failed,
+    })),
+    [savedMessages],
   );
   const busy = eve.status === "submitted" || eve.status === "streaming";
   const latestEntry = entries.at(-1);
   const awaitingFx = latestEntry?.role === "user" && !latestEntry.failed;
   const working = busy || awaitingFx || conversation.status === "working";
-  const lastRequest = [...entries].reverse().find((entry) => entry.role === "user")?.text;
+  const lastRequest = [...savedMessages].reverse().find((entry) => entry.role === "user");
   const eveSessionId = eve.session?.sessionId ?? conversation.eveSessionId;
 
   useEffect(() => {
@@ -540,45 +568,60 @@ function AgentChat({
     refreshRoster,
   ]);
 
-  async function dispatchMessage(message: string) {
-    const messageId = crypto.randomUUID();
-    setSavedMessages((current) => [
-      ...current,
-      {
-        id: `optimistic:${messageId}`,
-        requestId: messageId,
-        role: "user",
-        text: message,
-        artifacts: [],
-        failed: false,
-        createdAt: new Date().toISOString(),
-      },
-    ]);
+  async function dispatchMessage(message: string, existingMessageId?: string) {
+    const messageId = existingMessageId ?? crypto.randomUUID();
+    setSavedMessages((current) => current.some((entry) => entry.requestId === messageId)
+      ? current
+      : [
+          ...current,
+          {
+            id: `optimistic:${messageId}`,
+            requestId: messageId,
+            role: "user",
+            text: message,
+            artifacts: [],
+            failed: false,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
     const options = {
       turnPolicy: "queue" as const,
       headers: { "x-console-message-id": messageId },
     };
+    const client = new Client({
+      host: "",
+      auth: { bearer: async () => (await getToken()) ?? "" },
+      headers: () => ({
+        "x-console-agent-id": agent.id,
+        "x-console-conversation-id": conversation.id,
+      }),
+    });
     try {
       if (!eveSessionId) {
         await eve.send(message, options);
         return;
       }
-      const client = new Client({
-        host: "",
-        auth: { bearer: async () => (await getToken()) ?? "" },
-        headers: () => ({
-          "x-console-agent-id": agent.id,
-          "x-console-conversation-id": conversation.id,
-        }),
-      });
       await client.sessions.attach(eveSessionId).send(message, options);
       await refreshMessages();
     } catch (error) {
-      setSavedMessages((current) =>
-        current.map((entry) =>
-          entry.id === `optimistic:${messageId}` ? { ...entry, failed: true } : entry,
-        ),
-      );
+      if (error instanceof ClientError && error.code === "session_not_active" && eveSessionId) {
+        const response = await fetch(`/api/agents/${agent.id}/session`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedSessionId: eveSessionId }),
+        });
+        if (!response.ok) throw new Error(await readError(response));
+        const recovered = (await response.json()) as AgentProfile;
+        eve.reset();
+        if (recovered.eveSessionId) {
+          await client.sessions.attach(recovered.eveSessionId).send(message, options);
+          await refreshMessages();
+        } else {
+          await eve.send(message, options);
+        }
+        return;
+      }
+      await refreshMessages();
       throw error;
     }
   }
@@ -607,13 +650,66 @@ function AgentChat({
     setRetrying(true);
     setLocalError(undefined);
     try {
-      await dispatchMessage(lastRequest);
+      await dispatchMessage(
+        lastRequest.text,
+        lastRequest.failed ? undefined : lastRequest.requestId,
+      );
       refreshConversations();
       refreshRoster();
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "Unable to retry request");
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function refreshConversation() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setLocalError(undefined);
+    try {
+      const refreshed = await refreshMessages();
+      refreshConversations();
+      refreshRoster();
+      if (!refreshed) setLocalError("Unable to refresh this conversation");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function stopConversation() {
+    if (!working || stopping) return;
+    setStopping(true);
+    setLocalError(undefined);
+    try {
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(conversation.id)}/stop`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await readError(response));
+      const body = (await response.json()) as {
+        conversation: ConversationProfile;
+        targets: Array<{ agentId: string; eveSessionId: string }>;
+      };
+      onConversationUpdate(body.conversation);
+      await Promise.allSettled(body.targets.map(({ agentId, eveSessionId }) => {
+        const client = new Client({
+          host: "",
+          auth: { bearer: async () => (await getToken()) ?? "" },
+          headers: {
+            "x-console-agent-id": agentId,
+            "x-console-conversation-id": conversation.id,
+          },
+        });
+        return client.sessions.attach(eveSessionId).cancel();
+      }));
+      await refreshMessages();
+      refreshConversations();
+      refreshRoster();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "Unable to stop conversation");
+    } finally {
+      setStopping(false);
     }
   }
 
@@ -647,12 +743,43 @@ function AgentChat({
           </div>
         </div>
         <div className="flex items-center gap-1.5">
+          <Button onClick={() => setConversationTab("chat")} size="sm" type="button" variant={conversationTab === "chat" ? "secondary" : "ghost"}>
+            Chat
+          </Button>
+          <Button onClick={() => setConversationTab("activity")} size="sm" type="button" variant={conversationTab === "activity" ? "secondary" : "ghost"}>
+            <MessagesSquareIcon /> Activity
+          </Button>
+          <Button
+            aria-label="Stop conversation"
+            disabled={!working || stopping}
+            onClick={stopConversation}
+            size="icon-sm"
+            title="Stop conversation"
+            type="button"
+            variant="ghost"
+          >
+            {stopping ? <LoaderCircleIcon className="animate-spin" /> : <SquareIcon />}
+          </Button>
+          <Button
+            aria-label="Refresh conversation"
+            disabled={refreshing}
+            onClick={refreshConversation}
+            size="icon-sm"
+            title="Refresh conversation"
+            type="button"
+            variant="ghost"
+          >
+            <RefreshCwIcon className={refreshing ? "animate-spin" : undefined} />
+          </Button>
           <Badge className="hidden max-w-52 truncate font-mono font-normal lg:inline-flex" title={agent.fxConfig.model} variant="outline">
             {agent.fxConfig.model}
           </Badge>
         </div>
       </header>
 
+      {conversationTab === "activity" ? (
+        <ConversationActivityLog messages={activity} />
+      ) : (
       <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor" scrollPreviousItemPeek={64}>
         <MessageScroller>
           <MessageScrollerViewport>
@@ -735,6 +862,7 @@ function AgentChat({
           <MessageScrollerButton />
         </MessageScroller>
       </MessageScrollerProvider>
+      )}
 
       <div className="border-t bg-background/95 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-md sm:px-6">
         <div className="mx-auto w-full max-w-[var(--chat-content-width)]">
@@ -1026,6 +1154,11 @@ function AgentConsoleContent({
     setDesktopSidebarOpen(open);
   }
 
+  function openSidebar() {
+    if (window.matchMedia("(max-width: 760px)").matches) setMobileSidebarOpen(true);
+    else setSidebarOpen(true);
+  }
+
   function chooseConversation(conversationId: string) {
     setSelectedConversationId(conversationId);
     setMobileSidebarOpen(false);
@@ -1035,6 +1168,13 @@ function AgentConsoleContent({
     setConversations((current) => {
       const existing = current.find((conversation) => conversation.id === updated.id);
       const next = preserveConversationTitle(updated, existing);
+      if (!existing) return [next, ...current];
+      const existingActivity = Date.parse(existing.updatedAt);
+      const nextActivity = Date.parse(next.updatedAt);
+      if (nextActivity < existingActivity) return current;
+      if (nextActivity === existingActivity) {
+        return current.map((conversation) => conversation.id === next.id ? next : conversation);
+      }
       return [next, ...current.filter((conversation) => conversation.id !== updated.id)];
     });
   }, []);
@@ -1088,7 +1228,6 @@ function AgentConsoleContent({
   }, [getToken]);
 
   const removeConversation = useCallback(async (conversation: ConversationProfile) => {
-    await retireConversation(conversation);
     const response = await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
     if (!response.ok) throw new Error(await readError(response));
 
@@ -1101,14 +1240,13 @@ function AgentConsoleContent({
       const fallback = agents.find((agent) => agent.id.startsWith("general-")) ?? agents[0];
       if (fallback) await startConversation(fallback.id);
     }
-  }, [agents, conversations, retireConversation, selectedConversationId, startConversation]);
+  }, [agents, conversations, selectedConversationId, startConversation]);
 
   const removeAgent = useCallback(async (agent: AgentProfile) => {
-    await Promise.all(
-      conversations
-        .filter((conversation) => conversation.agentId === agent.id)
-        .map(retireConversation),
+    const activeConversation = conversations.find((conversation) =>
+      conversation.agentId === agent.id && conversation.eveSessionId === agent.eveSessionId
     );
+    if (activeConversation) await retireConversation(activeConversation);
     const response = await fetch(`/api/agents/${agent.id}`, { method: "DELETE" });
     if (!response.ok) throw new Error(await readError(response));
 
@@ -1236,7 +1374,7 @@ function AgentConsoleContent({
         ))}
       </nav>
       <Separator className="my-2" />
-      <details className="group shrink-0">
+      <details className="agent-directory group shrink-0">
         <summary className="flex cursor-pointer list-none items-center justify-between rounded-xl px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-sidebar-accent">
           <span>Agents</span>
           <span className="flex items-center gap-1"><Badge className="h-5 min-w-5 px-1.5" variant="secondary">{agents.length}</Badge><ChevronDownIcon className="transition-transform group-open:rotate-180" /></span>
@@ -1305,10 +1443,7 @@ function AgentConsoleContent({
         conversation={selectedConversation}
         key={`${selectedConversation.id}:${selected.id}:${selectedConversation.eveSessionId ?? "new"}`}
         onConversationUpdate={updateConversation}
-        onOpenSidebar={() => {
-          if (window.matchMedia("(max-width: 760px)").matches) setMobileSidebarOpen(true);
-          else setSidebarOpen(true);
-        }}
+        onOpenSidebar={openSidebar}
         refreshConversations={refreshConversations}
         refreshRoster={refreshRoster}
         sidebarOpen={desktopSidebarOpen}

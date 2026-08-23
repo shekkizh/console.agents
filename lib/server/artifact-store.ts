@@ -89,8 +89,15 @@ export async function getAgentArtifactContent(
 } | undefined> {
   const rows = await database().query(
     `SELECT filename, media_type, kind, size_bytes, content
-     FROM agent_artifacts
-     WHERE owner_id = $1 AND id = $2
+     FROM (
+       SELECT filename, media_type, kind, size_bytes, content
+       FROM agent_artifacts
+       WHERE owner_id = $1 AND id = $2
+       UNION ALL
+       SELECT filename, media_type, kind, size_bytes, content
+       FROM message_artifacts
+       WHERE owner_id = $1 AND id = $2
+     ) artifact
      LIMIT 1`,
     [ownerId, artifactId],
   );

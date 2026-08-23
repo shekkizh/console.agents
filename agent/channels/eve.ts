@@ -7,11 +7,12 @@ import {
   requireClerkSecretKey,
   requireE2ETestIdentity,
 } from "@/lib/server/config";
-import { recordIncomingAgentMessage } from "@/lib/server/agent-store";
 import {
   flattenInboundMessage,
   validConsoleMessageId,
 } from "@/lib/inbound-message";
+import { verifyMessageWakeToken } from "@/lib/server/message-auth";
+import { publishConversationMessage } from "@/lib/server/message-store";
 import { authorizedE2ETestRequest } from "@/lib/server/e2e-auth";
 
 function selectedAgentAttributes(request: Request) {
@@ -23,6 +24,36 @@ function selectedAgentAttributes(request: Request) {
     agentId,
     conversationId,
     ...(validConsoleMessageId(messageId) ? { messageId } : {}),
+  };
+}
+
+function messageBearer(): AuthFn<Request> {
+  return async (request) => {
+    if (request.headers.get("x-console-message-wake") !== "1") return null;
+    const bearer = extractBearerToken(request.headers.get("authorization"));
+    if (!bearer) return null;
+    const claims = verifyMessageWakeToken(bearer);
+    if (!claims) return null;
+    const attributes = selectedAgentAttributes(request);
+    if (
+      !attributes ||
+      attributes.agentId !== claims.targetAgentId ||
+      attributes.conversationId !== claims.conversationId ||
+      attributes.messageId !== claims.messageId
+    ) {
+      return null;
+    }
+    return {
+      attributes: {
+        ...attributes,
+        incomingMessageId: claims.messageId,
+        incomingFromAgentId: claims.fromAgentId,
+      },
+      authenticator: "console-message",
+      principalId: claims.ownerId,
+      principalType: "agent",
+      subject: claims.targetAgentId,
+    };
   };
 }
 
@@ -65,7 +96,9 @@ function clerkBearer(): AuthFn<Request> {
 }
 
 export default eveChannel({
-  auth: config.e2eTestMode ? [e2eBearer()] : [clerkBearer()],
+  auth: config.e2eTestMode
+    ? [messageBearer(), e2eBearer()]
+    : [messageBearer(), clerkBearer()],
   turnPolicy: "queue",
   async onMessage(ctx, message) {
     const principal = ctx.eve.caller;
@@ -80,15 +113,19 @@ export default eveChannel({
     ) {
       throw new Error("A valid mailbox message id is required");
     }
-    const text = flattenInboundMessage(message);
-    await recordIncomingAgentMessage({
-      ownerId: principal.principalId,
-      agentId,
-      conversationId,
-      messageId,
-      message: text,
-      eveSessionId: ctx.eve.sessionId,
-    });
+
+    if (principal.authenticator !== "console-message") {
+      await publishConversationMessage({
+        ownerId: principal.principalId,
+        id: messageId,
+        conversationId,
+        senderType: "human",
+        senderId: principal.principalId,
+        recipientType: "agent",
+        recipientId: agentId,
+        content: flattenInboundMessage(message),
+      });
+    }
     return { auth: principal };
   },
 });

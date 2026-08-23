@@ -5,6 +5,7 @@ import type { AgentArtifactKind } from "@/lib/types";
 
 export const ARTIFACT_MANIFEST_PATH = ".console/artifacts.json";
 export const ARTIFACT_PREVIEW_DIRECTORY = ".console/previews";
+export const A2A_OUTBOX_DIRECTORY = ".console/outbox";
 export const EMPTY_ARTIFACT_MANIFEST = '{"files":[]}\n';
 
 const MAX_ARTIFACTS = 4;
@@ -78,6 +79,41 @@ export function validArtifactPath(value: string): string | undefined {
   if (normalized === "." || normalized === ".." || normalized.startsWith("../")) return;
   if (!normalized.startsWith(`${ARTIFACT_PREVIEW_DIRECTORY}/`)) return;
   return normalized;
+}
+
+export function validPeerArtifactPath(value: string): string | undefined {
+  if (value.startsWith("/") || value.includes("\\") || /[\0-\x1f\x7f]/.test(value)) return;
+  const normalized = path.posix.normalize(value);
+  if (normalized === "." || normalized === ".." || normalized.startsWith("../")) return;
+  if (!normalized.startsWith(`${A2A_OUTBOX_DIRECTORY}/`)) return;
+  return normalized;
+}
+
+export function capturePeerArtifact(input: {
+  path: string;
+  title?: string;
+  content: Uint8Array;
+}): CapturedArtifact {
+  const normalized = validPeerArtifactPath(input.path);
+  const type = normalized ? artifactType(normalized) : undefined;
+  if (!normalized || !type) throw new Error("Peer artifact path or type is unsupported");
+  if (input.content.byteLength > type.maxBytes) throw new Error("Peer artifact is too large");
+  if (
+    type.kind === "text"
+      ? !validUtf8Text(input.content)
+      : !validBinarySignature(input.content, type.mediaType)
+  ) {
+    throw new Error("Peer artifact content does not match its file type");
+  }
+  const name = path.posix.basename(normalized);
+  return {
+    path: normalized,
+    name,
+    title: input.title?.trim().slice(0, 120) || name,
+    mediaType: type.mediaType,
+    kind: type.kind,
+    content: input.content,
+  };
 }
 
 export function parseArtifactManifest(raw: string): Array<{ path: string; title?: string }> {

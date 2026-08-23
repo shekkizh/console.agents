@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "WORKFLOW_LOCAL_BODY_TIMEOUT_MS=900000 next dev",
+    "dev": "WORKFLOW_LOCAL_BODY_TIMEOUT_MS=0 WORKFLOW_LOCAL_HEADERS_TIMEOUT_MS=0 next dev",
     "build": "next build --webpack",
     "db:migrate": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --experimental-strip-types scripts/migrate.ts",
     "start": "next start",

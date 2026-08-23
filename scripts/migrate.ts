@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { neon } from "@neondatabase/serverless";
+import { databaseUrl } from "../lib/server/config.ts";
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error("DATABASE_URL is required");
+const resolvedDatabaseUrl = databaseUrl();
+if (!resolvedDatabaseUrl) throw new Error("DATABASE_URL is required");
 
 const schemaPath = fileURLToPath(new URL("../db/schema.sql", import.meta.url));
 const schema = await readFile(schemaPath, "utf8");
@@ -12,7 +13,7 @@ const statements = schema
   .map((statement) => statement.trim())
   .filter(Boolean);
 
-const sql = neon(databaseUrl);
+const sql = neon(resolvedDatabaseUrl);
 await sql.transaction(statements.map((statement) => sql.query(statement)));
 
 const rows = await sql.query(
@@ -43,11 +44,19 @@ if (!runtimeVersionRows[0]) {
   throw new Error("Migration verification failed: missing conversations.runtime_version");
 }
 
-const artifactRows = await sql.query(
-  `SELECT to_regclass('public.agent_artifacts') AS relation`,
-);
-if (!(artifactRows[0] as { relation?: unknown } | undefined)?.relation) {
-  throw new Error("Migration verification failed: missing agent_artifacts table");
+for (const table of [
+  "agent_artifacts",
+  "conversation_messages",
+  "message_deliveries",
+  "message_artifacts",
+]) {
+  const messageRows = await sql.query(
+    `SELECT to_regclass($1) AS relation`,
+    [`public.${table}`],
+  );
+  if (!(messageRows[0] as { relation?: unknown } | undefined)?.relation) {
+    throw new Error(`Migration verification failed: missing ${table} table`);
+  }
 }
 
 console.log(`Database schema is current (${statements.length} statements applied).`);
