@@ -4,6 +4,7 @@ import { Client } from "eve/client";
 import type { AgentProfile, ConversationProfile } from "../../lib/types";
 import { E2E_BASE_URL, E2E_OWNER_ID, E2E_TOKEN } from "./constants";
 import { requireDatabaseUrl } from "../../lib/server/config";
+import { createAgentMessageToken } from "../../lib/server/message-auth";
 import { publishConversationMessage } from "../../lib/server/message-store";
 import { wakeMessage } from "../../lib/server/message-runtime";
 
@@ -293,6 +294,90 @@ test("accepts a signed message wakeup in the existing conversation", async ({
   await expect(loggedMessage).toContainText("System");
   await expect(loggedMessage).toContainText(recipient.name);
   await expect(loggedMessage).toContainText("Delivered");
+});
+
+test("sends a peer message through the A2A API and returns its correlated reply", async ({
+  request,
+}) => {
+  const agentsResponse = await request.get("/api/agents");
+  expect(agentsResponse.status()).toBe(200);
+  const sender = ((await agentsResponse.json()) as { agents: AgentProfile[] }).agents[0]!;
+  const recipientResponse = await request.post("/api/agents", {
+    data: {
+      name: "Peer Receiver",
+      specialty: "Replies to peer messages",
+      instructions: "Complete peer requests independently and reply directly.",
+    },
+  });
+  expect(recipientResponse.status()).toBe(201);
+  const recipient = (await recipientResponse.json()) as AgentProfile;
+  const conversationResponse = await request.post("/api/conversations", {
+    data: { agentId: sender.id },
+  });
+  expect(conversationResponse.status()).toBe(201);
+  const conversation = (await conversationResponse.json()) as ConversationProfile;
+  const token = createAgentMessageToken({
+    ownerId: E2E_OWNER_ID,
+    agentId: sender.id,
+    conversationId: conversation.id,
+  });
+
+  const sendResponse = await request.post("/api/a2a", {
+    headers: { authorization: `Bearer ${token}` },
+    data: {
+      operation: "send",
+      arguments: {
+        to: recipient.name,
+        content: "E2E_FAKE delay=10 reply=PEER_REPLY",
+        wait_for_reply: true,
+        timeout_s: 30,
+      },
+    },
+  });
+  const sendBody = await sendResponse.json();
+  const deliveryDiagnostic = sendResponse.status() === 200
+    ? []
+    : await database().query(
+        `SELECT message.sender_id, message.recipient_id, message.in_reply_to,
+                message.content, delivery.state, delivery.error
+         FROM conversation_messages message
+         LEFT JOIN message_deliveries delivery
+           ON delivery.owner_id = message.owner_id AND delivery.message_id = message.id
+         WHERE message.owner_id = $1 AND message.conversation_id = $2
+         ORDER BY message.created_at ASC`,
+        [E2E_OWNER_ID, conversation.id],
+      );
+  expect(
+    sendResponse.status(),
+    JSON.stringify({ sendBody, deliveryDiagnostic }),
+  ).toBe(200);
+  const result = sendBody as {
+    status: string;
+    messageId: string;
+    replies: Array<{
+      from: { id: string; name: string };
+      inReplyTo?: string;
+      content: string;
+    }>;
+  };
+  expect(result.status).toBe("replied");
+  expect(result.replies).toEqual([
+    expect.objectContaining({
+      from: { id: recipient.id, name: recipient.name },
+      inReplyTo: result.messageId,
+      content: "PEER_REPLY",
+    }),
+  ]);
+
+  const detailResponse = await request.get(`/api/conversations/${conversation.id}`);
+  expect(detailResponse.status()).toBe(200);
+  const detail = (await detailResponse.json()) as { activity: Array<Record<string, unknown>> };
+  expect(detail.activity).toContainEqual(expect.objectContaining({
+    id: result.messageId,
+    senderId: sender.id,
+    recipientId: recipient.id,
+    state: "completed",
+  }));
 });
 
 test("deletes conversations and moves a deleted agent's conversation to General", async ({ browser }) => {

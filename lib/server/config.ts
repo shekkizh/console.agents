@@ -75,12 +75,12 @@ export function consoleInternalUrl(): string {
   if (config.e2eTestMode) {
     return `http://127.0.0.1:${process.env.PORT ?? "3000"}`;
   }
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   if (process.env.NODE_ENV === "development") {
     return `http://127.0.0.1:${process.env.PORT ?? "3000"}`;
   }
   const publicUrl = process.env.NEXT_PUBLIC_APP_URL;
   if (publicUrl) return publicUrl.replace(/\/$/, "");
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   throw new Error("CONSOLE_INTERNAL_URL or NEXT_PUBLIC_APP_URL is required");
 }
 

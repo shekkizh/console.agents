@@ -1,7 +1,7 @@
 .git
 .next
 .output
-.eve/builds
+.eve
 node_modules
 npm-debug.log*
 .env

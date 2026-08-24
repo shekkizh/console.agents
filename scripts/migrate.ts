@@ -14,6 +14,39 @@ const statements = schema
   .filter(Boolean);
 
 const sql = neon(resolvedDatabaseUrl);
+
+const existingDeliveryColumns = await sql.query(
+  `SELECT column_name
+   FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'message_deliveries'`,
+);
+const deliveryColumns = new Set(
+  existingDeliveryColumns.map((row) => String((row as { column_name: unknown }).column_name)),
+);
+if (deliveryColumns.size > 0 && !deliveryColumns.has("recipient_type")) {
+  const legacyRows = await sql.query(
+    `SELECT to_regclass('public.task_message_deliveries') AS relation`,
+  );
+  if ((legacyRows[0] as { relation?: unknown } | undefined)?.relation) {
+    throw new Error(
+      "Migration cannot preserve the legacy message_deliveries table: task_message_deliveries already exists",
+    );
+  }
+  await sql.transaction([
+    sql.query("ALTER TABLE message_deliveries RENAME TO task_message_deliveries"),
+    sql.query(
+      "ALTER INDEX IF EXISTS message_deliveries_pkey RENAME TO task_message_deliveries_pkey",
+    ),
+    sql.query(
+      "ALTER INDEX IF EXISTS message_deliveries_inbox_idx RENAME TO task_message_deliveries_inbox_idx",
+    ),
+    sql.query(
+      `ALTER INDEX IF EXISTS message_deliveries_message_id_participant_id_key
+       RENAME TO task_message_deliveries_message_participant_key`,
+    ),
+  ]);
+}
+
 await sql.transaction(statements.map((statement) => sql.query(statement)));
 
 const rows = await sql.query(
