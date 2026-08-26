@@ -1,14 +1,14 @@
-import type { RuntimeSandboxSession, SandboxSession } from "eve/sandbox";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { a2aCliSource, A2A_CLI_PATH, A2A_CLI_SOURCE_PATH } from "@/lib/a2a-cli";
 import { optionalFxCapabilitiesSchema } from "@/lib/agent-capabilities";
+import type { AgentSandbox } from "@/lib/server/agent-sandbox";
 import {
   fxAgentInstructions,
   fxMcpProfileConfig,
   fxProjectConfig,
   fxSkillFile,
   fxReleaseBase,
-  parseFxAskResult,
   validateFxVersion,
 } from "@/lib/fx-config";
 import {
@@ -20,22 +20,14 @@ import {
 import { createAgentMessageToken } from "@/lib/server/message-auth";
 import { config, consoleAgentApiUrl, requireAiGatewayApiKey } from "@/lib/server/config";
 import { materializeMessageArtifacts } from "@/lib/server/message-runtime";
-import {
-  activeFxNetworkPolicy,
-  idleFxNetworkPolicy,
-  stopsFxSandboxAfterTurn,
-} from "@/lib/server/fx-network-policy";
-import type { AgentProfile, FxAskResult } from "@/lib/types";
-import {
-  ARTIFACT_MANIFEST_PATH,
-  EMPTY_ARTIFACT_MANIFEST,
-  collectPreviewArtifacts,
-  type CapturedArtifact,
-} from "@/lib/server/artifact-capture";
+import { latestFxCompletionSessionId } from "@/lib/server/message-store";
+import type { AgentProfile } from "@/lib/types";
 
-export const FX_BINARY_PATH = "/workspace/.console/bin/fx";
-const FX_SESSION_DIRECTORY = ".console/fx-sessions";
 const CONTROL_PATH = ".console/control-plane.json";
+
+export function fxBinaryPath(root = "/workspace"): string {
+  return root + "/.console/bin/fx";
+}
 
 const controlRequestSchema = z.discriminatedUnion("type", [
   z.object({
@@ -62,9 +54,13 @@ const controlRequestSchema = z.discriminatedUnion("type", [
 
 const controlEnvelopeSchema = z.object({ requests: z.array(controlRequestSchema).max(5) });
 
-export function fxInstallCommand(versionInput = config.fxVersion): string {
+export function fxInstallCommand(
+  versionInput = config.fxVersion,
+  root = "/workspace",
+): string {
   const version = validateFxVersion(versionInput);
   const releaseBase = fxReleaseBase(version);
+  const binaryPath = fxBinaryPath(root);
   return `set -eu
 arch="$(uname -m)"
 case "$arch" in
@@ -81,9 +77,9 @@ curl -fsSLO "$base/$name"
 curl -fsSLO "$base/$name.sha256"
 sha256sum -c "$name.sha256"
 tar -xzf "$name"
-mkdir -p /workspace/.console/bin
-install -m 0755 fx ${FX_BINARY_PATH}
-${FX_BINARY_PATH} --version`;
+mkdir -p '${root}/.console/bin'
+install -m 0755 fx '${binaryPath}'
+'${binaryPath}' --version`;
 }
 
 export function consolePlatformSkill(): string {
@@ -99,7 +95,7 @@ Do the user's substantive work yourself using your reasoning, tools, skills, and
 
 To create a persistent Console agent or update your own registered configuration, write this bounded outbox file:
 
-\`/workspace/.console/control-plane.json\`
+\`.console/control-plane.json\`
 
 \`\`\`json
 {
@@ -121,16 +117,15 @@ The other request type is \`update-self\`; it accepts \`requestId\` and profile 
 `;
 }
 
-async function syncFxCapabilities(sandbox: SandboxSession, agent: AgentProfile): Promise<void> {
-  await sandbox.removePath({ path: ".fx/skills", recursive: true, force: true });
-  const skillDirectory = await sandbox.run({ command: "mkdir -p /workspace/.fx/skills" });
+async function syncFxCapabilities(sandbox: AgentSandbox, agent: AgentProfile): Promise<void> {
+  await sandbox.removePath(".fx/skills", { recursive: true, force: true });
+  const skillDirectory = await sandbox.run({
+    command: "mkdir -p '" + sandbox.root + "/.fx/skills'",
+  });
   if (skillDirectory.exitCode !== 0) throw new Error("Unable to prepare the fx skills directory");
   await Promise.all(
     agent.fxConfig.skills.map((skill) =>
-      sandbox.writeTextFile({
-        path: `.fx/skills/${skill.name}/SKILL.md`,
-        content: fxSkillFile(skill),
-      }),
+      sandbox.writeTextFile(`.fx/skills/${skill.name}/SKILL.md`, fxSkillFile(skill)),
     ),
   );
 
@@ -141,43 +136,40 @@ async function syncFxCapabilities(sandbox: SandboxSession, agent: AgentProfile):
   }
   const prepare = await sandbox.run({ command: `mkdir -p '${home}/.fx'` });
   if (prepare.exitCode !== 0) throw new Error("Unable to prepare the fx profile directory");
-  await sandbox.writeTextFile({ path: `${home}/.fx/mcp.json`, content: fxMcpProfileConfig(agent) });
+  await sandbox.writeTextFile(`${home}/.fx/mcp.json`, fxMcpProfileConfig(agent));
 }
 
-async function ensureFxInstalled(sandbox: SandboxSession): Promise<void> {
-  const probe = await sandbox.run({ command: `test -x ${FX_BINARY_PATH}` });
+async function ensureFxInstalled(sandbox: AgentSandbox): Promise<void> {
+  const binaryPath = fxBinaryPath(sandbox.root);
+  const probe = await sandbox.run({ command: `test -x '${binaryPath}'` });
   if (probe.exitCode !== 0) {
-    const install = await sandbox.run({ command: fxInstallCommand() });
+    const install = await sandbox.run({
+      command: fxInstallCommand(config.fxVersion, sandbox.root),
+    });
     if (install.exitCode !== 0) {
       throw new Error(`Unable to install fx ${config.fxVersion}: ${install.stderr.slice(0, 500)}`);
     }
   }
-  await sandbox.writeTextFile({
-    path: A2A_CLI_SOURCE_PATH,
-    content: a2aCliSource(),
-  });
+  await sandbox.writeTextFile(A2A_CLI_SOURCE_PATH, a2aCliSource());
   const executable = await sandbox.run({
-    command: `install -m 0755 /workspace/${A2A_CLI_SOURCE_PATH} /workspace/${A2A_CLI_PATH}`,
+    command: `install -m 0755 '${sandbox.root}/${A2A_CLI_SOURCE_PATH}' '${sandbox.root}/${A2A_CLI_PATH}'`,
   });
   if (executable.exitCode !== 0) throw new Error("Unable to install agent messaging command");
 }
 
 export async function syncFxAgentConfig(
-  sandbox: SandboxSession,
+  sandbox: AgentSandbox,
   agent: AgentProfile,
   roster: AgentProfile[],
 ): Promise<void> {
   await syncFxCapabilities(sandbox, agent);
   await Promise.all([
-    sandbox.writeTextFile({ path: "AGENTS.md", content: fxAgentInstructions(agent) }),
-    sandbox.writeTextFile({ path: ".fx.json", content: fxProjectConfig(agent) }),
-    sandbox.writeTextFile({
-      path: "skills/console-platform/SKILL.md",
-      content: consolePlatformSkill(),
-    }),
-    sandbox.writeTextFile({
-      path: ".console/agents.json",
-      content: `${JSON.stringify(
+    sandbox.writeTextFile("AGENTS.md", fxAgentInstructions(agent)),
+    sandbox.writeTextFile(".fx.json", fxProjectConfig(agent)),
+    sandbox.writeTextFile("skills/console-platform/SKILL.md", consolePlatformSkill()),
+    sandbox.writeTextFile(
+      ".console/agents.json",
+      `${JSON.stringify(
         roster.map(({ id, name, specialty, enabled, fxConfig }) => ({
           id,
           name,
@@ -188,7 +180,7 @@ export async function syncFxAgentConfig(
         null,
         2,
       )}\n`,
-    }),
+    ),
   ]);
 }
 
@@ -200,11 +192,11 @@ function validSessionId(value: string | null): string | undefined {
 async function applyControlRequests(input: {
   ownerId: string;
   agent: AgentProfile;
-  sandbox: SandboxSession;
+  sandbox: AgentSandbox;
 }): Promise<{ applied: Array<Record<string, unknown>>; currentAgent: AgentProfile }> {
   let raw: string | null = null;
   try {
-    raw = await input.sandbox.readTextFile({ path: CONTROL_PATH });
+    raw = await input.sandbox.readTextFile(CONTROL_PATH);
   } catch {
     raw = null;
   }
@@ -255,55 +247,58 @@ async function applyControlRequests(input: {
     applied.push({ requestId, type: request.type, configVersion: currentAgent.configVersion });
   }
 
-  await input.sandbox.writeTextFile({ path: CONTROL_PATH, content: '{"requests":[]}\n' });
+  await input.sandbox.writeTextFile(CONTROL_PATH, '{"requests":[]}\n');
   return { applied, currentAgent };
 }
 
-export interface FxTurnOutcome extends FxAskResult {
-  controlPlaneChanges: Array<Record<string, unknown>>;
-  artifacts: CapturedArtifact[];
+export interface FxLaunchOutcome {
+  sandboxId: string;
+  processId?: string;
+  resumedSessionId?: string;
 }
 
-export async function runFxTurn(input: {
+function fxJobKey(requestId: string): string {
+  return createHash("sha256").update(requestId).digest("hex").slice(0, 24);
+}
+
+export async function launchFxTurn(input: {
   ownerId: string;
   agent: AgentProfile;
   conversationId: string;
   prompt: string;
-  incomingMessageId?: string;
+  incomingMessageId: string;
   incomingFromAgentId?: string;
-  sandbox: RuntimeSandboxSession;
-  abortSignal?: AbortSignal;
-}): Promise<FxTurnOutcome> {
+  sandbox: AgentSandbox;
+}): Promise<FxLaunchOutcome> {
   await ensureFxInstalled(input.sandbox);
-  const roster = await listAgents(input.ownerId);
-  await syncFxAgentConfig(input.sandbox, input.agent, roster);
+  await syncFxAgentConfig(input.sandbox, input.agent, await listAgents(input.ownerId));
 
   if (!/^conversation-[A-Za-z0-9-]+$/.test(input.conversationId)) {
     throw new Error("Invalid conversation id");
   }
-  const sessionDirectory = await input.sandbox.run({
-    command: `mkdir -p /workspace/${FX_SESSION_DIRECTORY}`,
+  const previousSession = validSessionId(await latestFxCompletionSessionId({
+    ownerId: input.ownerId,
+    agentId: input.agent.id,
+    conversationId: input.conversationId,
+  }) ?? null);
+  const jobKey = fxJobKey(input.incomingMessageId);
+  const jobDirectory = `.console/jobs/${jobKey}`;
+  await input.sandbox.removePath(jobDirectory, { recursive: true, force: true });
+  const prepared = await input.sandbox.run({
+    command: `mkdir -p '${input.sandbox.root}/${jobDirectory}'`,
   });
-  if (sessionDirectory.exitCode !== 0) throw new Error("Unable to prepare FX sessions");
-  const fxSessionPath = `${FX_SESSION_DIRECTORY}/${input.conversationId}.id`;
-  let storedSession: string | null = null;
-  try {
-    storedSession = await input.sandbox.readTextFile({ path: fxSessionPath });
-  } catch {
-    storedSession = null;
-  }
-  const previousSession = validSessionId(storedSession);
-  await Promise.all([
-    input.sandbox.writeTextFile({ path: ".console/prompt.txt", content: input.prompt }),
-    input.sandbox.writeTextFile({
-      path: ARTIFACT_MANIFEST_PATH,
-      content: EMPTY_ARTIFACT_MANIFEST,
-    }),
-  ]);
+  if (prepared.exitCode !== 0) throw new Error("Unable to prepare the FX job directory");
+  await input.sandbox.writeTextFile(`${jobDirectory}/prompt.txt`, input.prompt);
 
   const resume = previousSession ? '--resume-id "$FX_RESUME_ID"' : "";
-  const command = `export PATH="/workspace/.console/bin:$PATH" && cd /workspace && prompt="$(cat .console/prompt.txt)" && exec ${FX_BINARY_PATH} ask --json --yolo ${resume} -- "$prompt"`;
-  const stopAfterTurn = stopsFxSandboxAfterTurn();
+  const binaryPath = fxBinaryPath(input.sandbox.root);
+  const command = `set -eu
+echo $$ > '${input.sandbox.root}/${jobDirectory}/worker.pid'
+export PATH="${input.sandbox.root}/.console/bin:$PATH"
+cd '${input.sandbox.root}'
+prompt="$(cat '${input.sandbox.root}/${jobDirectory}/prompt.txt')"
+rm -f '${input.sandbox.root}/${jobDirectory}/prompt.txt'
+exec '${binaryPath}' ask --yolo ${resume} -- "$prompt" >/dev/null 2>&1`;
   const messageToken = createAgentMessageToken({
     ownerId: input.ownerId,
     agentId: input.agent.id,
@@ -314,59 +309,47 @@ export async function runFxTurn(input: {
 
   try {
     await input.sandbox.setNetworkPolicy(
-      activeFxNetworkPolicy(
-        input.agent.fxConfig.networkAccess,
-        input.agent.fxConfig.networkAllowlist,
-      ),
+      input.agent.fxConfig.networkAccess,
+      input.agent.fxConfig.networkAllowlist,
     );
-    if (input.incomingMessageId) {
-      await materializeMessageArtifacts(
-        { ownerId: input.ownerId, sandbox: input.sandbox },
-        input.incomingMessageId,
-      );
-    }
-    const run = await input.sandbox.run({
+    await materializeMessageArtifacts(
+      { ownerId: input.ownerId, sandbox: input.sandbox },
+      input.incomingMessageId,
+    );
+    const process = await input.sandbox.spawn({
       command,
-      abortSignal: input.abortSignal,
       env: {
         AI_GATEWAY_API_KEY: requireAiGatewayApiKey(),
         CONSOLE_A2A_TOKEN: messageToken,
         CONSOLE_A2A_URL: consoleAgentApiUrl(),
+        CONSOLE_WORKSPACE: input.sandbox.root,
         FX_MODEL: input.agent.fxConfig.model,
         FX_RESUME_ID: previousSession ?? "",
       },
     });
-    const result = parseFxAskResult(run.stdout);
-    if (run.exitCode !== 0 || result.exitCode !== 0) {
-      throw new Error(result.output || run.stderr.slice(0, 1_000) || `fx exited ${run.exitCode}`);
-    }
-    await input.sandbox.writeTextFile({ path: fxSessionPath, content: `${result.sessionId}\n` });
-    const control = await applyControlRequests(input);
-    if (control.currentAgent.configVersion !== input.agent.configVersion) {
-      await syncFxAgentConfig(input.sandbox, control.currentAgent, await listAgents(input.ownerId));
-    }
-    const artifacts = await collectPreviewArtifacts(input.sandbox);
-    return { ...result, controlPlaneChanges: control.applied, artifacts };
-  } finally {
-    try {
-      await input.sandbox.writeTextFile({ path: ".console/prompt.txt", content: "" });
-    } catch {
-      // The sandbox may already be gone after cancellation.
-    }
-
-    if (stopAfterTurn) {
-      // Local compute stops after every turn; the durable filesystem and policy are preserved.
-      try {
-        await input.sandbox.stop();
-      } catch {
-        // Best effort: the sandbox provider may already be gone after cancellation.
-      }
-    } else {
-      try {
-        await input.sandbox.setNetworkPolicy(idleFxNetworkPolicy());
-      } catch {
-        // Best effort: the sandbox provider may already be gone after cancellation.
-      }
-    }
+    return {
+      sandboxId: input.sandbox.id,
+      processId: process.id,
+      resumedSessionId: previousSession,
+    };
+  } catch (error) {
+    throw error;
   }
+}
+
+export async function finalizeDetachedFxTurn(input: {
+  ownerId: string;
+  agent: AgentProfile;
+  sandbox: AgentSandbox;
+}): Promise<Array<Record<string, unknown>>> {
+  const control = await applyControlRequests(input);
+  if (control.currentAgent.configVersion !== input.agent.configVersion) {
+    await syncFxAgentConfig(input.sandbox, control.currentAgent, await listAgents(input.ownerId));
+  }
+  await Promise.all(
+    [".console/jobs", ".console/inbox", ".console/outbox"].map((path) =>
+      input.sandbox.removePath(path, { recursive: true, force: true }).catch(() => undefined)
+    ),
+  );
+  return control.applied;
 }

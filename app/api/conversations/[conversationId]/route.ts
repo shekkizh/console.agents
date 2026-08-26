@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { requireOwner } from "@/lib/server/auth";
 import {
   deleteConversation,
@@ -6,6 +6,7 @@ import {
   listConversationActivity,
   listConversationMessages,
 } from "@/lib/server/conversation-store";
+import { dispatchNextAgentTask } from "@/lib/server/task-dispatcher";
 
 export async function GET(
   _request: Request,
@@ -17,6 +18,14 @@ export async function GET(
     const conversation = await getConversation(ownerId, conversationId);
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+    if (conversation.status === "working") {
+      after(() =>
+        dispatchNextAgentTask({
+          ownerId,
+          agentId: conversation.agentId,
+        }).catch(() => undefined)
+      );
     }
     return NextResponse.json({
       conversation,

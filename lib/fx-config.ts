@@ -1,4 +1,4 @@
-import type { AgentProfile, FxAskResult, FxMcpServerConfig, FxSkillConfig } from "@/lib/types";
+import type { AgentProfile, FxMcpServerConfig, FxSkillConfig } from "@/lib/types";
 
 export function fxProjectConfig(agent: AgentProfile): string {
   return `${JSON.stringify(
@@ -21,29 +21,33 @@ ${agent.instructions}
 
 ## Console runtime
 
-You are agent \`${agent.id}\` in a persistent, externally isolated sandbox. Each activation is a message from Eve. Treat its content as your primary objective and do the work directly. Your final response is automatically delivered back to Eve as the correlated reply; do not poll for delivery or wrap it in a transport envelope.
+You are agent \`${agent.id}\` in a persistent, externally isolated sandbox. Each activation is one item claimed from your durable Console inbox. Treat its content as your primary objective and do the work directly.
 
-You own reasoning, planning, tool choice, shell work, files, skills, and subagents. Use those capabilities autonomously instead of asking Eve to construct a workflow for you. Prefer flexible model judgment and reusable skills over hard-coded task-specific automation. You have full control of this sandbox, but never claim access outside it.
+You own reasoning, planning, tool choice, shell work, files, skills, and subagents. Your top-level inbox is sequential, while you may launch concurrent FX subagents when parallel work helps. Use those capabilities autonomously. Prefer flexible model judgment and reusable skills over hard-coded task-specific automation. You have full control of this sandbox, but never claim access outside it.
 
-### Inline previews
+### Completion and files
 
-When you create files the user should see with your response, place or copy them under \`/workspace/.console/previews/\`, then write \`/workspace/.console/artifacts.json\` before finishing:
+You must finish every successful task with exactly one correlated completion call. Write the final response to a file when it is more than a short sentence, then make this your final tool action:
 
-\`\`\`json
-{"files":[{"path":".console/previews/example.png","title":"Optional preview title"}]}
+\`\`\`bash
+a2a complete --message-file .console/final.md
 \`\`\`
 
-Declare at most four files. Console previews PNG, JPEG, GIF, WebP, PDF, UTF-8 text, code, Markdown, CSV, and JSON. Keep each image or PDF under 4 MB and each text file under 1 MB. Use paths relative to \`/workspace\`, do not declare secrets, and do not put raw sandbox paths or download links in the final response. For office documents, create a PDF preview.
+For a short response, use \`a2a complete --message "..."\`. This call is the only terminal delivery mechanism; ordinary final output is not delivered. Do not continue working after it succeeds.
+
+When you create files the recipient should see, copy them under \`.console/outbox/\` and add each one with \`--artifact .console/outbox/<file>\` on the completion call. Attach at most four files and never attach secrets. For office documents, also provide a PDF preview.
+
+Progress is optional. For genuinely long work, use \`a2a progress --message "..."\` for sparse, useful milestones. Progress does not finish the task. Do not send routine narration or use progress as a heartbeat.
 
 The Console control plane remains trusted and separate. Use the \`console-platform\` skill when asked to create another persistent agent or change your own registered profile. Creating a local process or subagent does not add it to Console until you register it through that skill. Credentials are brokered outside your process; never attempt to discover, print, copy, or persist them.
 
 ## Messaging
 
-This agent is a participant in the current conversation and can contact other persistent agents through the \`a2a\` terminal command. Run \`a2a list\` to discover reachable agents. Run \`a2a send --to <id-or-name> --message "..."\` to contact one; a new request waits for its correlated reply by default. Use \`--no-wait\` to send immediately, including when contacting several peers, then run \`a2a wait\` to collect messages. The roster also includes \`user\`; send to it when an asynchronous result or useful update should appear directly in the human-visible chat.
+This agent is a participant in the current conversation and can contact other persistent agents through the \`a2a\` terminal command. Run \`a2a list\` to discover reachable agents. Run \`a2a send --to <id-or-name> --message "..."\` to contact one; a new request waits for its correlated reply by default. Use \`--no-wait\` to send immediately, including when contacting several peers, then run \`a2a wait\` to collect messages. The roster also includes \`user\`; use ordinary \`a2a send\` only for an additional message that is not the correlated progress or completion of this task.
 
 You decide autonomously whether collaboration is useful, whom to contact, what to ask, and how to use replies. Console only transports messages and artifacts; it does not impose a coordination workflow. A peer sees only the self-contained content and artifacts you explicitly send, never this workspace, its other files, or your reasoning.
 
-Incoming work starts with a \`[message]\` envelope. Its \`from\`, \`messageId\`, and \`conversationId\` fields identify the sender and shared conversation. Your ordinary final response is delivered back to that sender automatically. Use \`a2a send\` only to contact additional agents or to send another message before finishing; add \`--wait\` when you want a response during this activation.
+Incoming work starts with a \`[message]\` envelope. Its \`from\`, \`messageId\`, and \`conversationId\` fields identify the sender and shared conversation. \`a2a progress\` and \`a2a complete\` automatically use that correlation. Use \`a2a send\` only to contact additional agents; add \`--wait\` when you want a response during this activation.
 
 To send files, place copies under \`.console/outbox/\` and pass each path with \`--artifact\`. Received files are private copies under \`.console/inbox/<messageId>/\`; paths are listed in the incoming envelope or command result.
 `;
@@ -88,32 +92,6 @@ export function fxMcpProfileConfig(agent: AgentProfile): string {
     null,
     2,
   )}\n`;
-}
-
-export function parseFxAskResult(stdout: string): FxAskResult {
-  const trimmed = stdout.trim();
-  if (!trimmed) throw new Error("fx returned no JSON output");
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    const lastLine = trimmed.split("\n").findLast((line) => line.trim().startsWith("{"));
-    if (!lastLine) throw new Error("fx returned invalid JSON output");
-    parsed = JSON.parse(lastLine);
-  }
-
-  if (!parsed || typeof parsed !== "object") throw new Error("fx returned an invalid result");
-  const value = parsed as Record<string, unknown>;
-  const output = typeof value.output === "string" ? value.output : "";
-  const exitCode = typeof value.exit_code === "number" ? value.exit_code : 1;
-  const model = typeof value.model === "string" ? value.model : "unknown";
-  const sessionId = typeof value.session_id === "string" ? value.session_id : "";
-  const steps = typeof value.steps === "number" ? value.steps : 0;
-  const toolCalls = Array.isArray(value.tool_calls) ? value.tool_calls : [];
-
-  if (!sessionId && exitCode === 0) throw new Error("fx did not return a session id");
-  return { output, exitCode, model, sessionId, steps, toolCalls };
 }
 
 export function validateFxVersion(version: string): string {

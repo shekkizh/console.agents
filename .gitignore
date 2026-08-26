@@ -1,6 +1,6 @@
 node_modules
 .next
-.eve
+.next-e2e
 .output
 output/playwright
 .vercel

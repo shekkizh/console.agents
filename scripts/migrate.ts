@@ -23,7 +23,7 @@ const rows = await sql.query(
    ORDER BY ordinal_position`,
 );
 const columns = new Set(rows.map((row) => String((row as { column_name: unknown }).column_name)));
-for (const required of ["fx_config", "config_version", "eve_session_id", "enabled"]) {
+for (const required of ["fx_config", "config_version", "created_by_agent_id", "enabled"]) {
   if (!columns.has(required)) throw new Error(`Migration verification failed: missing ${required}`);
 }
 
@@ -34,18 +34,8 @@ if (!(conversationRows[0] as { relation?: unknown } | undefined)?.relation) {
   throw new Error("Migration verification failed: missing conversations table");
 }
 
-const runtimeVersionRows = await sql.query(
-  `SELECT column_default
-   FROM information_schema.columns
-   WHERE table_schema = 'public' AND table_name = 'conversations'
-     AND column_name = 'runtime_version'`,
-);
-if (!runtimeVersionRows[0]) {
-  throw new Error("Migration verification failed: missing conversations.runtime_version");
-}
-
 for (const table of [
-  "agent_artifacts",
+  "agent_events",
   "conversation_messages",
   "message_deliveries",
   "message_artifacts",
@@ -57,6 +47,13 @@ for (const table of [
   if (!(messageRows[0] as { relation?: unknown } | undefined)?.relation) {
     throw new Error(`Migration verification failed: missing ${table} table`);
   }
+}
+
+const activeIndexRows = await sql.query(
+  `SELECT to_regclass('public.message_deliveries_one_active_agent_idx') AS relation`,
+);
+if (!(activeIndexRows[0] as { relation?: unknown } | undefined)?.relation) {
+  throw new Error("Migration verification failed: missing active-agent delivery index");
 }
 
 console.log(`Database schema is current (${statements.length} statements applied).`);

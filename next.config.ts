@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
-import { withEve } from "eve/next";
 
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  distDir: process.env.E2E_TEST_MODE === "1" ? ".next-e2e" : ".next",
+  serverExternalPackages: ["microsandbox"],
+};
 
-export default withEve(nextConfig);
+export default nextConfig;

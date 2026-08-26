@@ -15,6 +15,11 @@ test("ships a direct mailbox CLI without MCP or filesystem polling", () => {
   assert.match(source, /call_api\("list"/);
   assert.match(source, /call_api\("send"/);
   assert.match(source, /call_api\("wait"/);
+  assert.match(source, /MAX_POLL_SECONDS = 20/);
+  assert.match(source, /continue_waiting_for_send/);
+  assert.match(source, /commands\.add_parser\("progress"/);
+  assert.match(source, /commands\.add_parser\("complete"/);
+  assert.match(source, /current_fx_session_id/);
   assert.doesNotMatch(source, /\bmcp\b/i);
   assert.doesNotMatch(source, /time\.sleep|requests\.jsonl|responses\//);
 

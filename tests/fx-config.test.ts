@@ -6,7 +6,6 @@ import {
   fxProjectConfig,
   fxSkillFile,
   fxReleaseBase,
-  parseFxAskResult,
   validateFxVersion,
 } from "../lib/fx-config.ts";
 import type { AgentProfile } from "../lib/types.ts";
@@ -25,7 +24,6 @@ const agent: AgentProfile = {
     mcpServers: {},
   },
   configVersion: 3,
-  eveSessionId: null,
   createdByAgentId: null,
   enabled: true,
   createdAt: "2026-08-20T00:00:00.000Z",
@@ -64,42 +62,18 @@ test("renders the sandbox boundary into fx instructions", () => {
   assert.match(instructions, /full control of this sandbox/);
   assert.match(instructions, /never claim access outside it/i);
   assert.match(instructions, /Prefer flexible model judgment and reusable skills/);
-  assert.match(instructions, /\.console\/artifacts\.json/);
-  assert.match(instructions, /For office documents, create a PDF preview/);
-  const manifestExample = /```json\n([^\n]+)\n```/.exec(instructions)?.[1];
-  assert.deepEqual(JSON.parse(manifestExample ?? "null"), {
-    files: [{ path: ".console/previews/example.png", title: "Optional preview title" }],
-  });
+  assert.match(instructions, /a2a complete --message-file/);
+  assert.match(instructions, /only terminal delivery mechanism/);
+  assert.match(instructions, /a2a progress/);
+  assert.match(instructions, /For office documents, also provide a PDF preview/);
   assert.match(instructions, /console-platform/);
   assert.doesNotMatch(instructions, /sk_[A-Za-z0-9]/);
   assert.match(instructions, /a2a list/);
   assert.match(instructions, /a2a send/);
+  assert.match(instructions, /a2a complete/);
   assert.doesNotMatch(instructions, /a2a_(?:list|send|wait)/);
   assert.match(instructions, /decide autonomously whether collaboration is useful/i);
   assert.match(instructions, /\.console\/outbox/);
-});
-
-test("parses fx ask JSON output", () => {
-  assert.deepEqual(
-    parseFxAskResult(
-      JSON.stringify({
-        output: "Done",
-        exit_code: 0,
-        model: "zai/glm-5.2",
-        session_id: "session.1",
-        steps: 4,
-        tool_calls: [{ name: "terminal" }],
-      }),
-    ),
-    {
-      output: "Done",
-      exitCode: 0,
-      model: "zai/glm-5.2",
-      sessionId: "session.1",
-      steps: 4,
-      toolCalls: [{ name: "terminal" }],
-    },
-  );
 });
 
 test("rejects unpinned fx versions", () => {

@@ -34,7 +34,6 @@ export interface AgentProfile {
   instructions: string;
   fxConfig: FxAgentConfig;
   configVersion: number;
-  eveSessionId: string | null;
   createdByAgentId: string | null;
   enabled: boolean;
   createdAt: string;
@@ -69,7 +68,6 @@ export interface ConversationProfile {
   agentId: string;
   agentName: string;
   title: string;
-  eveSessionId: string | null;
   status: ConversationStatus;
   createdAt: string;
   updatedAt: string;
@@ -77,8 +75,8 @@ export interface ConversationProfile {
 
 export type MessageDeliveryState =
   | "queued"
-  | "dispatched"
   | "claimed"
+  | "running"
   | "completed"
   | "failed";
 
@@ -90,20 +88,11 @@ export interface ConversationMessageActivity {
   recipientType: "human" | "agent";
   recipientId: string;
   recipientName: string;
-  kind: "message" | "error" | "tick";
+  kind: "message" | "error";
   inReplyTo: string | null;
   content: string;
   summary: string | null;
   state: MessageDeliveryState;
   artifactCount: number;
   createdAt: string;
-}
-
-export interface FxAskResult {
-  output: string;
-  exitCode: number;
-  model: string;
-  sessionId: string;
-  steps: number;
-  toolCalls: unknown[];
 }

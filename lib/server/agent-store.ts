@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { config, requireDatabaseUrl } from "@/lib/server/config";
-import { CONVERSATION_RUNTIME_VERSION } from "@/lib/conversation-runtime";
 import { fxMcpServersSchema, fxNetworkAllowlistSchema, fxSkillsSchema } from "@/lib/agent-capabilities";
 import type { AgentProfile, FxAgentConfig, FxMcpServerConfig, FxNetworkAccess, FxSkillConfig } from "@/lib/types";
 
@@ -12,7 +11,6 @@ interface AgentRow {
   instructions: string;
   fx_config: unknown;
   config_version: number;
-  eve_session_id: string | null;
   created_by_agent_id: string | null;
   enabled: boolean;
   created_at: string | Date;
@@ -73,7 +71,6 @@ function toAgent(row: AgentRow): AgentProfile {
     instructions: row.instructions,
     fxConfig: normalizeFxConfig(row.fx_config),
     configVersion: row.config_version,
-    eveSessionId: row.eve_session_id,
     createdByAgentId: row.created_by_agent_id,
     enabled: row.enabled,
     createdAt: new Date(row.created_at).toISOString(),
@@ -83,7 +80,7 @@ function toAgent(row: AgentRow): AgentProfile {
 
 const selectColumns = `
   id, name, specialty, instructions, fx_config, config_version,
-  eve_session_id, created_by_agent_id, enabled, created_at, updated_at
+  created_by_agent_id, enabled, created_at, updated_at
 `;
 
 export async function ensureDefaultAgent(ownerId: string): Promise<AgentProfile> {
@@ -206,13 +203,11 @@ export async function deleteAgent(
          AND message.id = delivery.message_id
          AND delivery.recipient_type = 'agent'
          AND delivery.recipient_id = target.id
-         AND delivery.state IN ('queued', 'dispatched', 'claimed')
+         AND delivery.state IN ('queued', 'claimed', 'running')
        RETURNING message.conversation_id
      ), moved AS (
        UPDATE conversations conversation SET
          agent_id = $3,
-         eve_session_id = NULL,
-         runtime_version = $4,
          status = CASE
            WHEN EXISTS (
              SELECT 1 FROM settled WHERE settled.conversation_id = conversation.id
@@ -241,7 +236,7 @@ export async function deleteAgent(
      )
      SELECT id, (SELECT count(*)::int FROM moved) AS reassigned_count
      FROM deleted_agent`,
-    [ownerId, agentId, general.id, CONVERSATION_RUNTIME_VERSION],
+    [ownerId, agentId, general.id],
   );
   if (!rows[0]) throw new Error("Agent not found");
   return {
@@ -254,7 +249,7 @@ export async function updateAgent(
   ownerId: string,
   agentId: string,
   input: AgentUpdate,
-  actor: { type: "human" | "agent" | "eve"; id: string },
+  actor: { type: "human" | "agent"; id: string },
 ): Promise<AgentProfile> {
   const existing = await getAgent(ownerId, agentId);
   if (!existing) throw new Error("Agent not found");
@@ -299,63 +294,11 @@ export async function updateAgent(
   return toAgent(rows[0] as AgentRow);
 }
 
-export async function claimAgentSession(
-  ownerId: string,
-  agentId: string,
-  eveSessionId: string,
-): Promise<AgentProfile> {
-  const sql = database();
-  const rows = await sql.query(
-    `UPDATE agents SET
-       eve_session_id = COALESCE(eve_session_id, $3),
-       updated_at = CASE WHEN eve_session_id IS NULL THEN now() ELSE updated_at END
-     WHERE owner_id = $1 AND id = $2 AND enabled = true
-       AND (eve_session_id IS NULL OR eve_session_id = $3)
-     RETURNING ${selectColumns}`,
-    [ownerId, agentId, eveSessionId],
-  );
-  if (!rows[0]) {
-    const existing = await getAgent(ownerId, agentId);
-    if (!existing) throw new Error("Agent not found");
-    if (!existing.enabled) throw new Error("Agent is disabled");
-    throw new Error("This agent is bound to a different durable Eve session");
-  }
-  return toAgent(rows[0] as AgentRow);
-}
-
-export async function resetAgentSession(
-  ownerId: string,
-  agentId: string,
-  expectedSessionId: string,
-): Promise<AgentProfile> {
-  const sql = database();
-  const rows = await sql.query(
-    `UPDATE agents SET eve_session_id = NULL, updated_at = now()
-     WHERE owner_id = $1 AND id = $2 AND eve_session_id = $3
-     RETURNING ${selectColumns}`,
-    [ownerId, agentId, expectedSessionId],
-  );
-  if (!rows[0]) {
-    const existing = await getAgent(ownerId, agentId);
-    if (!existing) throw new Error("Agent not found");
-    return existing;
-  }
-  await recordAgentEvent({
-    ownerId,
-    agentId,
-    actorType: "system",
-    actorId: "inactive-session-recovery",
-    eventType: "agent.session.reset",
-    payload: { previousSessionId: expectedSessionId },
-  });
-  return toAgent(rows[0] as AgentRow);
-}
-
 export async function recordAgentEvent(input: {
   ownerId: string;
   agentId: string;
   conversationId?: string;
-  actorType: "human" | "agent" | "eve" | "system";
+  actorType: "human" | "agent" | "system";
   actorId: string;
   eventType: string;
   payload?: unknown;
