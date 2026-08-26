@@ -1,5 +1,6 @@
 import { Client, neon } from "@neondatabase/serverless";
 import type { CapturedArtifact } from "@/lib/server/artifact-capture";
+import { FX_CLAIM_STALE_MS, FX_STALE_DELIVERY_MS } from "@/lib/fx-runtime-constants";
 import { requireDatabaseListenerUrl, requireDatabaseUrl } from "@/lib/server/config";
 import { getAgent, listAgents } from "@/lib/server/agent-store";
 import type {
@@ -23,7 +24,7 @@ function notificationKey(ownerId: string, recipientId: string): string {
 
 export type MessageParticipantType = "human" | "agent" | "system";
 export type MessageRecipientType = "human" | "agent";
-export type ConversationMessageKind = "message" | "error" | "tick";
+export type ConversationMessageKind = "message" | "error";
 
 export interface ConversationMessage {
   id: string;
@@ -185,6 +186,26 @@ export async function getConversationMessage(
   return rows[0] ? toMessage(rows[0] as MessageRow) : undefined;
 }
 
+export async function latestFxCompletionSessionId(input: {
+  ownerId: string;
+  agentId: string;
+  conversationId: string;
+}): Promise<string | undefined> {
+  const rows = await database().query(
+    `SELECT metadata->>'sessionId' AS session_id
+     FROM conversation_messages
+     WHERE owner_id = $1 AND conversation_id = $2
+       AND sender_type = 'agent' AND sender_id = $3
+       AND metadata->>'activity' = 'completion'
+       AND metadata->>'sessionId' IS NOT NULL
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [input.ownerId, input.conversationId, input.agentId],
+  );
+  const sessionId = (rows[0] as { session_id?: unknown } | undefined)?.session_id;
+  return typeof sessionId === "string" ? sessionId : undefined;
+}
+
 export async function publishConversationMessage(input: {
   ownerId: string;
   id?: string;
@@ -283,13 +304,11 @@ export async function publishConversationMessage(input: {
              WHEN title = 'New conversation' THEN left(regexp_replace($3, '\\s+', ' ', 'g'), 64)
              ELSE title
            END,
-           runtime_version = 2,
-           eve_session_id = NULL,
            status = CASE WHEN EXISTS (
              SELECT 1 FROM message_deliveries delivery
              WHERE delivery.owner_id = $1
                AND delivery.message_id = $4
-               AND delivery.state IN ('queued', 'dispatched', 'claimed')
+               AND delivery.state IN ('queued', 'claimed', 'running')
            ) THEN 'working' ELSE status END,
            updated_at = now()
          WHERE owner_id = $1 AND id = $2`,
@@ -327,19 +346,21 @@ export async function markMessageDelivery(
   state: MessageDeliveryState,
   error?: string,
 ): Promise<void> {
-  const timestamp = state === "dispatched"
-    ? "dispatched_at"
-    : state === "claimed"
+  const timestamp = state === "claimed"
       ? "claimed_at"
-      : state === "completed" || state === "failed"
-        ? "completed_at"
-        : undefined;
+      : state === "running"
+        ? "running_at"
+        : state === "completed" || state === "failed"
+          ? "completed_at"
+          : undefined;
   const setTimestamp = timestamp ? `, ${timestamp} = now()` : "";
-  const stateGuard = state === "dispatched"
-    ? "AND state = 'queued'"
-    : state === "claimed" || state === "completed" || state === "failed"
-      ? "AND state IN ('queued', 'dispatched', 'claimed')"
-      : "";
+  const stateGuard = state === "claimed"
+      ? "AND state IN ('queued', 'claimed')"
+      : state === "running"
+        ? "AND state = 'claimed'"
+        : state === "completed" || state === "failed"
+          ? "AND state IN ('queued', 'claimed', 'running')"
+          : "";
   await database().query(
     `UPDATE message_deliveries
      SET state = $4, error = $5${setTimestamp}
@@ -361,7 +382,7 @@ export async function markMessageDelivery(
          WHERE message.owner_id = $1
            AND message.conversation_id = conversation.id
            AND delivery.recipient_type = 'agent'
-           AND delivery.state IN ('queued', 'dispatched', 'claimed')
+           AND delivery.state IN ('queued', 'claimed', 'running')
        ) THEN 'working'
        WHEN $3 = 'failed' AND EXISTS (
          SELECT 1
@@ -394,7 +415,7 @@ export async function isMessageDeliveryPending(
        FROM message_deliveries
        WHERE owner_id = $1 AND message_id = $2
          AND recipient_type = 'agent' AND recipient_id = $3
-         AND state IN ('queued', 'dispatched', 'claimed')
+         AND state IN ('queued', 'claimed', 'running')
      ) AS pending`,
     [ownerId, messageId, recipientId],
   );
@@ -408,19 +429,49 @@ export interface PendingAgentMessage extends ConversationMessage {
 export async function nextPendingAgentMessage(input: {
   ownerId: string;
   agentId: string;
-  conversationId: string;
 }): Promise<PendingAgentMessage | undefined> {
-  const rows = await database().query(
-    `WITH selected AS (
+  const sql = database();
+  await sql.query(
+    `UPDATE message_deliveries delivery
+     SET state = 'queued',
+         claimed_at = NULL,
+         running_at = NULL,
+         error = 'Recovered after sandbox lease expired'
+     FROM conversation_messages message
+     WHERE delivery.owner_id = $1
+       AND message.owner_id = delivery.owner_id
+       AND message.id = delivery.message_id
+       AND delivery.recipient_type = 'agent'
+       AND delivery.recipient_id = $2
+       AND (
+         (delivery.state = 'claimed' AND delivery.claimed_at <= now() - ($3::double precision * interval '1 millisecond'))
+         OR
+         (delivery.state = 'running' AND delivery.running_at <= now() - ($4::double precision * interval '1 millisecond'))
+       )`,
+    [input.ownerId, input.agentId, FX_CLAIM_STALE_MS, FX_STALE_DELIVERY_MS],
+  );
+  const rows = await sql.query(
+    `WITH guard AS (
+       SELECT pg_try_advisory_xact_lock(hashtext($1), hashtext($2)) AS acquired
+     ), selected AS (
        SELECT delivery.id
        FROM message_deliveries delivery
        JOIN conversation_messages message
          ON message.owner_id = delivery.owner_id AND message.id = delivery.message_id
+       CROSS JOIN guard
        WHERE delivery.owner_id = $1
          AND delivery.recipient_type = 'agent'
          AND delivery.recipient_id = $2
-         AND delivery.state IN ('queued', 'dispatched', 'claimed')
-         AND message.conversation_id = $3
+         AND delivery.state = 'queued'
+         AND guard.acquired
+         AND NOT EXISTS (
+           SELECT 1
+           FROM message_deliveries active_delivery
+           WHERE active_delivery.owner_id = delivery.owner_id
+             AND active_delivery.recipient_type = 'agent'
+             AND active_delivery.recipient_id = delivery.recipient_id
+             AND active_delivery.state IN ('claimed', 'running')
+         )
        ORDER BY delivery.created_at ASC, delivery.id ASC
        LIMIT 1
        FOR UPDATE OF delivery SKIP LOCKED
@@ -436,10 +487,28 @@ export async function nextPendingAgentMessage(input: {
      FROM claimed
      JOIN conversation_messages message
        ON message.owner_id = $1 AND message.id = claimed.message_id`,
-    [input.ownerId, input.agentId, input.conversationId],
+    [input.ownerId, input.agentId],
   );
   const row = rows[0] as (MessageRow & { delivery_state: MessageDeliveryState }) | undefined;
   return row ? { ...toMessage(row), deliveryState: row.delivery_state } : undefined;
+}
+
+export async function hasActiveAgentDelivery(
+  ownerId: string,
+  agentId: string,
+): Promise<boolean> {
+  const rows = await database().query(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM message_deliveries
+       WHERE owner_id = $1
+         AND recipient_type = 'agent'
+         AND recipient_id = $2
+         AND state IN ('claimed', 'running')
+     ) AS active`,
+    [ownerId, agentId],
+  );
+  return Boolean((rows[0] as { active?: boolean } | undefined)?.active);
 }
 
 export async function claimConversationMessages(input: {
@@ -459,7 +528,7 @@ export async function claimConversationMessages(input: {
        WHERE delivery.owner_id = $1
          AND delivery.recipient_type = 'agent'
          AND delivery.recipient_id = $2
-         AND delivery.state IN ('queued', 'dispatched', 'claimed')
+         AND delivery.state IN ('queued', 'claimed')
          AND message.conversation_id = $3
          AND message.sender_type = 'agent'
          AND ($4::text IS NULL OR message.sender_id = $4)

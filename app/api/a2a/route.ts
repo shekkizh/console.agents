@@ -1,11 +1,14 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { z } from "zod";
 import { capturePeerArtifact, type CapturedArtifact } from "@/lib/server/artifact-capture";
 import { verifyAgentMessageToken } from "@/lib/server/message-auth";
 import { executeMessageOperation } from "@/lib/server/message-runtime";
+import { settleCompletedAgentTask } from "@/lib/server/task-dispatcher";
+
+export const maxDuration = 300;
 
 const requestSchema = z.object({
-  operation: z.enum(["list", "send", "wait"]),
+  operation: z.enum(["list", "send", "wait", "progress", "complete"]),
   arguments: z.record(z.unknown()),
 }).strict();
 
@@ -58,7 +61,7 @@ export async function POST(request: Request) {
   try {
     const body = requestSchema.parse(await request.json());
     const args = { ...body.arguments };
-    const artifacts = body.operation === "send"
+    const artifacts = ["send", "progress", "complete"].includes(body.operation)
       ? uploadedArtifacts(args.artifacts)
       : [];
     delete args.artifacts;
@@ -75,6 +78,14 @@ export async function POST(request: Request) {
       args,
       artifacts,
     );
+    if (body.operation === "complete") {
+      after(() =>
+        settleCompletedAgentTask({
+          ownerId: claims.ownerId,
+          agentId: claims.agentId,
+        }).catch(() => undefined)
+      );
+    }
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(

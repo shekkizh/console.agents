@@ -5,7 +5,6 @@ import {
   createAgent,
   deleteAgent,
   ensureDefaultAgent,
-  resetAgentSession,
 } from "../../lib/server/agent-store.ts";
 import {
   createConversation,
@@ -39,26 +38,6 @@ test(
     const agent = await ensureDefaultAgent(ownerId);
     const conversation = await createConversation(ownerId, agent.id);
 
-    await sql.query(
-      "UPDATE agents SET eve_session_id = $3 WHERE owner_id = $1 AND id = $2",
-      [ownerId, agent.id, "stale-session"],
-    );
-    assert.equal(
-      (await resetAgentSession(ownerId, agent.id, "different-session")).eveSessionId,
-      "stale-session",
-    );
-    assert.equal(
-      (await resetAgentSession(ownerId, agent.id, "stale-session")).eveSessionId,
-      null,
-    );
-
-    await sql.query(
-      `UPDATE conversations
-       SET runtime_version = 1, eve_session_id = 'legacy-session'
-       WHERE owner_id = $1 AND id = $2`,
-      [ownerId, conversation.id],
-    );
-
     const first = {
       ownerId,
       id: "request-alpha",
@@ -74,19 +53,12 @@ test(
       publishConversationMessage(first),
     ]);
 
-    const rotatedRows = await sql.query(
-      `SELECT runtime_version, eve_session_id,
-         (SELECT count(*)::int FROM conversation_messages
-          WHERE owner_id = $1 AND conversation_id = $2
-            AND id = 'request-alpha') AS request_count
-       FROM conversations WHERE owner_id = $1 AND id = $2`,
+    const requestRows = await sql.query(
+      `SELECT count(*)::int AS request_count FROM conversation_messages
+       WHERE owner_id = $1 AND conversation_id = $2 AND id = 'request-alpha'`,
       [ownerId, conversation.id],
     );
-    assert.deepEqual(rotatedRows[0], {
-      runtime_version: 2,
-      eve_session_id: null,
-      request_count: 1,
-    });
+    assert.deepEqual(requestRows[0], { request_count: 1 });
 
     await publishConversationMessage({
       ...first,
@@ -96,7 +68,6 @@ test(
     const pendingAlpha = await nextPendingAgentMessage({
       ownerId,
       agentId: agent.id,
-      conversationId: conversation.id,
     });
     assert.equal(pendingAlpha?.id, "request-alpha");
     assert.equal(pendingAlpha?.content, "alpha");
@@ -118,7 +89,6 @@ test(
     const pendingBeta = await nextPendingAgentMessage({
       ownerId,
       agentId: agent.id,
-      conversationId: conversation.id,
     });
     assert.equal(pendingBeta?.id, "request-beta");
     assert.equal(pendingBeta?.content, "beta");
@@ -153,7 +123,6 @@ test(
       await nextPendingAgentMessage({
         ownerId,
         agentId: agent.id,
-        conversationId: conversation.id,
       }),
       undefined,
     );
@@ -178,7 +147,6 @@ test(
 
     const persisted = await getConversation(ownerId, conversation.id);
     assert.equal(persisted?.title, "alpha");
-    assert.equal(persisted?.eveSessionId, null);
     assert.equal(persisted?.status, "completed");
   },
 );
@@ -270,7 +238,6 @@ test(
     const reassigned = await getConversation(ownerId, secondConversation.id);
     assert.equal(reassigned?.agentId, general.id);
     assert.equal(reassigned?.agentName, general.name);
-    assert.equal(reassigned?.eveSessionId, null);
     assert.deepEqual(
       (await listConversationMessages(ownerId, secondConversation.id)).map(
         ({ role, text }) => ({ role, text }),

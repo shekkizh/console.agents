@@ -13,7 +13,6 @@ export const config = {
   clerkEnabled: Boolean(
     process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
   ),
-  eveModelId: process.env.EVE_MODEL_ID ?? DEFAULT_FX_MODEL,
   defaultFxModel: process.env.FX_MODEL ?? DEFAULT_FX_MODEL,
   fxVersion: process.env.FX_VERSION ?? "v0.0.4",
   e2eTestMode,

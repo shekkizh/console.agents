@@ -1,17 +1,11 @@
 "use client";
 
-import { useAuth, UserButton } from "@clerk/nextjs";
-import { Client, ClientError } from "eve/client";
-import { useEveAgent } from "eve/react";
+import { UserButton } from "@clerk/nextjs";
 import {
-  createContext,
   FormEvent,
-  type ReactNode,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import {
@@ -109,30 +103,11 @@ type DeleteTarget =
   | { kind: "conversation"; conversation: ConversationProfile }
   | { kind: "agent"; agent: AgentProfile };
 
-type ConsoleToken = () => Promise<string>;
 type ColorTheme = "dark" | "light" | "system";
 type ChatWidth = "default" | "wide";
 
 const e2eToken =
   process.env.NODE_ENV === "production" ? undefined : process.env.NEXT_PUBLIC_E2E_TEST_TOKEN;
-const ConsoleTokenContext = createContext<ConsoleToken | undefined>(undefined);
-
-function useConsoleToken(): ConsoleToken {
-  const getToken = useContext(ConsoleTokenContext);
-  if (!getToken) throw new Error("Console authentication is unavailable");
-  return getToken;
-}
-
-function ClerkConsoleTokenProvider({ children }: { children: ReactNode }) {
-  const { getToken } = useAuth();
-  const consoleToken = useCallback(async () => (await getToken()) ?? "", [getToken]);
-  return (
-    <ConsoleTokenContext.Provider value={consoleToken}>
-      {children}
-    </ConsoleTokenContext.Provider>
-  );
-}
-
 function SiteSettings() {
   const [theme, setTheme] = useState<ColorTheme>("system");
   const [chatWidth, setChatWidth] = useState<ChatWidth>("default");
@@ -382,10 +357,10 @@ function activityStateLabel(state: ConversationMessageActivity["state"]): string
     ? "Delivered"
     : state === "failed"
       ? "Failed"
-      : state === "claimed"
-        ? "Received"
-        : state === "dispatched"
-          ? "Activated"
+      : state === "running"
+        ? "Working"
+        : state === "claimed"
+          ? "Received"
           : "Queued";
 }
 
@@ -451,8 +426,8 @@ function AgentChat({
   refreshRoster: () => void;
   sidebarOpen: boolean;
 }) {
-  const getToken = useConsoleToken();
   const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -492,77 +467,27 @@ function AgentChat({
       ignore = true;
     };
   }, [conversation.id, onConversationUpdate]);
-  const eve = useEveAgent({
-    auth: { bearer: async () => (await getToken()) ?? "" },
-    headers: () => ({
-      "x-console-agent-id": agent.id,
-      "x-console-conversation-id": conversation.id,
-    }),
-    initialSession: conversation.eveSessionId
-      ? { sessionId: conversation.eveSessionId, streamIndex: 0 }
-      : undefined,
-    onFinish: () => {
-      refreshRoster();
-      refreshConversations();
-      void refreshMessages();
-    },
-  });
   const entries = useMemo<TranscriptEntry[]>(
     () => savedMessages.map(({ id, role, text, artifacts, failed }) => ({
       id, role, text, artifacts, failed,
     })),
     [savedMessages],
   );
-  const busy = eve.status === "submitted" || eve.status === "streaming";
   const latestEntry = entries.at(-1);
   const awaitingFx = latestEntry?.role === "user" && !latestEntry.failed;
-  const working = busy || awaitingFx || conversation.status === "working";
+  const working = awaitingFx || conversation.status === "working";
   const lastRequest = [...savedMessages].reverse().find((entry) => entry.role === "user");
-  const eveSessionId = eve.session?.sessionId ?? conversation.eveSessionId;
 
   useEffect(() => {
-    if (!eveSessionId) return;
-    const abortController = new AbortController();
-    const client = new Client({
-      host: "",
-      auth: { bearer: async () => (await getToken()) ?? "" },
-      headers: () => ({
-        "x-console-agent-id": agent.id,
-        "x-console-conversation-id": conversation.id,
-      }),
-    });
-    const session = client.sessions.attach(eveSessionId);
-
-    void (async () => {
-      try {
-        for await (const event of session.stream({
-          signal: abortController.signal,
-          startIndex: -1,
-        })) {
-          if (
-            event.type === "action.partial" ||
-            event.type === "action.result" ||
-            event.type === "turn.completed" ||
-            event.type === "turn.failed" ||
-            event.type === "turn.cancelled"
-          ) {
-            await refreshMessages();
-            refreshConversations();
-            refreshRoster();
-          }
-        }
-      } catch {
-        // The durable stream can disconnect during development rebuilds or
-        // navigation. The next mount resumes from Eve's persisted session.
-      }
-    })();
-
-    return () => abortController.abort();
+    if (!working) return;
+    const timer = window.setInterval(() => {
+      void refreshMessages();
+      refreshConversations();
+      refreshRoster();
+    }, 1_500);
+    return () => window.clearInterval(timer);
   }, [
-    agent.id,
-    conversation.id,
-    eveSessionId,
-    getToken,
+    working,
     refreshConversations,
     refreshMessages,
     refreshRoster,
@@ -584,52 +509,27 @@ function AgentChat({
             createdAt: new Date().toISOString(),
           },
         ]);
-    const options = {
-      turnPolicy: "queue" as const,
-      headers: { "x-console-message-id": messageId },
-    };
-    const client = new Client({
-      host: "",
-      auth: { bearer: async () => (await getToken()) ?? "" },
-      headers: () => ({
-        "x-console-agent-id": agent.id,
-        "x-console-conversation-id": conversation.id,
-      }),
-    });
+    setSubmitting(true);
     try {
-      if (!eveSessionId) {
-        await eve.send(message, options);
-        return;
-      }
-      await client.sessions.attach(eveSessionId).send(message, options);
-      await refreshMessages();
-    } catch (error) {
-      if (error instanceof ClientError && error.code === "session_not_active" && eveSessionId) {
-        const response = await fetch(`/api/agents/${agent.id}/session`, {
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(conversation.id)}/messages`,
+        {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ expectedSessionId: eveSessionId }),
-        });
-        if (!response.ok) throw new Error(await readError(response));
-        const recovered = (await response.json()) as AgentProfile;
-        eve.reset();
-        if (recovered.eveSessionId) {
-          await client.sessions.attach(recovered.eveSessionId).send(message, options);
-          await refreshMessages();
-        } else {
-          await eve.send(message, options);
-        }
-        return;
-      }
+          body: JSON.stringify({ id: messageId, content: message }),
+        },
+      );
+      if (!response.ok) throw new Error(await readError(response));
       await refreshMessages();
-      throw error;
+    } finally {
+      setSubmitting(false);
     }
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const message = draft.trim();
-    if (!message || (busy && !eveSessionId)) return;
+    if (!message || submitting) return;
     setDraft("");
     setLocalError(undefined);
     onConversationUpdate({
@@ -687,22 +587,8 @@ function AgentChat({
         { method: "POST" },
       );
       if (!response.ok) throw new Error(await readError(response));
-      const body = (await response.json()) as {
-        conversation: ConversationProfile;
-        targets: Array<{ agentId: string; eveSessionId: string }>;
-      };
+      const body = (await response.json()) as { conversation: ConversationProfile };
       onConversationUpdate(body.conversation);
-      await Promise.allSettled(body.targets.map(({ agentId, eveSessionId }) => {
-        const client = new Client({
-          host: "",
-          auth: { bearer: async () => (await getToken()) ?? "" },
-          headers: {
-            "x-console-agent-id": agentId,
-            "x-console-conversation-id": conversation.id,
-          },
-        });
-        return client.sessions.attach(eveSessionId).cancel();
-      }));
       await refreshMessages();
       refreshConversations();
       refreshRoster();
@@ -713,11 +599,7 @@ function AgentChat({
     }
   }
 
-  const activityLabel = eve.status === "submitted"
-    ? "Queued"
-    : eve.status === "streaming"
-      ? "Generating response"
-      : "Working in the sandbox";
+  const activityLabel = submitting ? "Queuing message" : "Working in the sandbox";
 
   return (
     <section className="grid min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden bg-background">
@@ -866,9 +748,9 @@ function AgentChat({
 
       <div className="border-t bg-background/95 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-md sm:px-6">
         <div className="mx-auto w-full max-w-[var(--chat-content-width)]">
-          {localError || eve.error ? (
+          {localError ? (
             <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              <span>{localError ?? eve.error?.message}</span>
+              <span>{localError}</span>
               {lastRequest ? <Button disabled={retrying} onClick={retryLastRequest} size="xs" type="button" variant="destructive">Retry</Button> : null}
             </div>
           ) : null}
@@ -889,7 +771,7 @@ function AgentChat({
             />
             <div className="absolute inset-x-3 bottom-2 flex items-center justify-between">
               <span className="hidden text-[11px] text-muted-foreground sm:inline"><kbd>Enter</kbd> to send · <kbd>Shift Enter</kbd> for a new line</span>
-              <Button aria-label="Send message" className="ml-auto rounded-xl" disabled={!draft.trim() || (busy && !eveSessionId)} size="icon-sm" type="submit">
+              <Button aria-label="Send message" className="ml-auto rounded-xl" disabled={!draft.trim() || submitting} size="icon-sm" type="submit">
                 <LucideSendIcon />
               </Button>
             </div>
@@ -1132,7 +1014,6 @@ function AgentConsoleContent({
   initialAgents: AgentProfile[];
   initialConversations: ConversationProfile[];
 }) {
-  const getToken = useConsoleToken();
   const [agents, setAgents] = useState(initialAgents);
   const [conversations, setConversations] = useState(initialConversations);
   const [selectedConversationId, setSelectedConversationId] = useState(
@@ -1143,7 +1024,6 @@ function AgentConsoleContent({
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>();
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const seenBackgroundEvents = useRef(new Set<string>());
   const selectedConversation =
     conversations.find((conversation) => conversation.id === selectedConversationId) ??
     conversations[0];
@@ -1212,22 +1092,10 @@ function AgentConsoleContent({
     setMobileSidebarOpen(false);
   }, []);
 
-  const retireConversation = useCallback(async (conversation: ConversationProfile) => {
-    if (!conversation.eveSessionId) return;
-    const client = new Client({
-      host: "",
-      auth: { bearer: async () => (await getToken()) ?? "" },
-      headers: {
-        "x-console-agent-id": conversation.agentId,
-        "x-console-conversation-id": conversation.id,
-      },
-    });
-    const session = client.sessions.attach(conversation.eveSessionId);
-    await session.cancel().catch(() => undefined);
-    await session.reset({ reason: "Deleted from Agent Console" }).catch(() => undefined);
-  }, [getToken]);
-
   const removeConversation = useCallback(async (conversation: ConversationProfile) => {
+    if (conversation.status === "working") {
+      await fetch(`/api/conversations/${conversation.id}/stop`, { method: "POST" });
+    }
     const response = await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
     if (!response.ok) throw new Error(await readError(response));
 
@@ -1243,10 +1111,15 @@ function AgentConsoleContent({
   }, [agents, conversations, selectedConversationId, startConversation]);
 
   const removeAgent = useCallback(async (agent: AgentProfile) => {
-    const activeConversation = conversations.find((conversation) =>
-      conversation.agentId === agent.id && conversation.eveSessionId === agent.eveSessionId
+    await Promise.allSettled(
+      conversations
+        .filter((conversation) =>
+          conversation.agentId === agent.id && conversation.status === "working"
+        )
+        .map((conversation) =>
+          fetch(`/api/conversations/${conversation.id}/stop`, { method: "POST" })
+        ),
     );
-    if (activeConversation) await retireConversation(activeConversation);
     const response = await fetch(`/api/agents/${agent.id}`, { method: "DELETE" });
     if (!response.ok) throw new Error(await readError(response));
 
@@ -1258,14 +1131,13 @@ function AgentConsoleContent({
             ...conversation,
             agentId: fallback.id,
             agentName: fallback.name,
-            eveSessionId: null,
             status: conversation.status === "working" ? "failed" as const : conversation.status,
           }
         : conversation,
     );
     setAgents(remainingAgents);
     setConversations(remainingConversations);
-  }, [agents, conversations, retireConversation]);
+  }, [agents, conversations]);
 
   const chooseAgent = useCallback(
     async (agentId: string) => {
@@ -1277,50 +1149,10 @@ function AgentConsoleContent({
   );
 
   useEffect(() => {
-    const watchers = conversations
-      .filter(
-        (conversation) =>
-          conversation.id !== selectedConversationId &&
-          conversation.status === "working" &&
-          Boolean(conversation.eveSessionId),
-      )
-      .map((conversation) => {
-        const abortController = new AbortController();
-        const client = new Client({
-          host: "",
-          auth: { bearer: async () => (await getToken()) ?? "" },
-          headers: () => ({
-            "x-console-agent-id": conversation.agentId,
-            "x-console-conversation-id": conversation.id,
-          }),
-        });
-        const session = client.sessions.attach(conversation.eveSessionId!);
-        void (async () => {
-          try {
-            for await (const event of session.stream({
-              signal: abortController.signal,
-              startIndex: -1,
-            })) {
-              if (
-                event.type === "turn.completed" ||
-                event.type === "turn.failed" ||
-                event.type === "turn.cancelled"
-              ) {
-                const eventId = event.meta.id;
-                if (seenBackgroundEvents.current.has(eventId)) continue;
-                seenBackgroundEvents.current.add(eventId);
-                await refreshConversations();
-              }
-            }
-          } catch {
-            // Leaving a conversation only closes its browser stream; the
-            // durable Eve task and fx sandbox continue server-side.
-          }
-        })();
-        return abortController;
-      });
-    return () => watchers.forEach((watcher) => watcher.abort());
-  }, [conversations, getToken, refreshConversations, selectedConversationId]);
+    if (!conversations.some((conversation) => conversation.status === "working")) return;
+    const interval = window.setInterval(() => void refreshConversations(), 1_500);
+    return () => window.clearInterval(interval);
+  }, [conversations, refreshConversations]);
 
   if (!selected || !selectedConversation) return null;
 
@@ -1441,7 +1273,7 @@ function AgentConsoleContent({
       <AgentChat
         agent={selected}
         conversation={selectedConversation}
-        key={`${selectedConversation.id}:${selected.id}:${selectedConversation.eveSessionId ?? "new"}`}
+        key={`${selectedConversation.id}:${selected.id}`}
         onConversationUpdate={updateConversation}
         onOpenSidebar={openSidebar}
         refreshConversations={refreshConversations}
@@ -1480,16 +1312,5 @@ export function AgentConsole(props: {
   initialAgents: AgentProfile[];
   initialConversations: ConversationProfile[];
 }) {
-  if (e2eToken) {
-    return (
-      <ConsoleTokenContext.Provider value={async () => e2eToken}>
-        <AgentConsoleContent {...props} />
-      </ConsoleTokenContext.Provider>
-    );
-  }
-  return (
-    <ClerkConsoleTokenProvider>
-      <AgentConsoleContent {...props} />
-    </ClerkConsoleTokenProvider>
-  );
+  return <AgentConsoleContent {...props} />;
 }

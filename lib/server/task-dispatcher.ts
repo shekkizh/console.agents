@@ -1,0 +1,162 @@
+import { createHash } from "node:crypto";
+import { acquireAgentSandbox } from "@/lib/server/agent-sandbox";
+import { getAgent, listAgents } from "@/lib/server/agent-store";
+import { config } from "@/lib/server/config";
+import { runE2EFakeFxTurn } from "@/lib/server/e2e-fx";
+import {
+  finalizeDetachedFxTurn,
+  launchFxTurn,
+} from "@/lib/server/fx-runtime";
+import { executeMessageOperation, formatMessageEnvelope } from "@/lib/server/message-runtime";
+import {
+  hasActiveAgentDelivery,
+  isMessageDeliveryPending,
+  markMessageDelivery,
+  nextPendingAgentMessage,
+  publishConversationMessage,
+} from "@/lib/server/message-store";
+
+export type DispatchOutcome =
+  | { status: "idle" | "active" }
+  | { status: "started"; messageId: string; sandboxId: string; processId?: string }
+  | { status: "completed"; messageId: string }
+  | { status: "failed"; messageId: string; error: string };
+
+function correlatedErrorId(ownerId: string, agentId: string, requestId: string): string {
+  const hex = createHash("sha256")
+    .update("error:\0" + ownerId + ":\0" + agentId + ":\0" + requestId)
+    .digest("hex")
+    .slice(0, 32);
+  return (
+    hex.slice(0, 8) + "-" +
+    hex.slice(8, 12) + "-4" +
+    hex.slice(13, 16) + "-a" +
+    hex.slice(17, 20) + "-" +
+    hex.slice(20)
+  );
+}
+
+export async function dispatchNextAgentTask(input: {
+  ownerId: string;
+  agentId: string;
+}): Promise<DispatchOutcome> {
+  const agent = await getAgent(input.ownerId, input.agentId);
+  if (!agent?.enabled) return { status: "idle" };
+  const request = await nextPendingAgentMessage({
+    ownerId: input.ownerId,
+    agentId: input.agentId,
+  });
+  if (!request) {
+    return {
+      status: await hasActiveAgentDelivery(input.ownerId, input.agentId)
+        ? "active"
+        : "idle",
+    };
+  }
+
+  await markMessageDelivery(input.ownerId, request.id, input.agentId, "running");
+  if (!await isMessageDeliveryPending(input.ownerId, request.id, input.agentId)) {
+    return { status: "idle" };
+  }
+
+  try {
+    if (config.e2eFakeFx) {
+      const result = await runE2EFakeFxTurn({ agent, prompt: request.content });
+      if (!await isMessageDeliveryPending(input.ownerId, request.id, input.agentId)) {
+        return { status: "idle" };
+      }
+      await executeMessageOperation(
+        {
+          ownerId: input.ownerId,
+          agentId: input.agentId,
+          conversationId: request.conversationId,
+          incomingMessageId: request.id,
+          incomingFromAgentId: request.senderType === "agent"
+            ? request.senderId
+            : undefined,
+        },
+        "complete",
+        { content: result.output, session_id: result.sessionId },
+        result.artifacts,
+      );
+      await dispatchNextAgentTask(input);
+      return { status: "completed", messageId: request.id };
+    }
+
+    const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+    const launch = await launchFxTurn({
+      ownerId: input.ownerId,
+      agent,
+      conversationId: request.conversationId,
+      prompt: await formatMessageEnvelope({ ownerId: input.ownerId, message: request }),
+      incomingMessageId: request.id,
+      incomingFromAgentId: request.senderType === "agent" ? request.senderId : undefined,
+      sandbox,
+    });
+    return {
+      status: "started",
+      messageId: request.id,
+      sandboxId: launch.sandboxId,
+      processId: launch.processId,
+    };
+  } catch (error) {
+    const diagnostic = error instanceof Error ? error.name + ": " + error.message : String(error);
+    if (await isMessageDeliveryPending(input.ownerId, request.id, input.agentId)) {
+      await publishConversationMessage({
+        ownerId: input.ownerId,
+        id: correlatedErrorId(input.ownerId, input.agentId, request.id),
+        conversationId: request.conversationId,
+        senderType: "agent",
+        senderId: input.agentId,
+        recipientType: request.senderType === "agent" ? "agent" : "human",
+        recipientId: request.senderType === "agent" ? request.senderId : input.ownerId,
+        kind: "error",
+        inReplyTo: request.id,
+        content: "The agent could not start this request. Your message was preserved and can be retried safely.",
+        metadata: { diagnostic },
+      });
+      await markMessageDelivery(
+        input.ownerId,
+        request.id,
+        input.agentId,
+        "failed",
+        diagnostic,
+      );
+      await dispatchNextAgentTask(input);
+    }
+    return { status: "failed", messageId: request.id, error: diagnostic };
+  }
+}
+
+export async function settleCompletedAgentTask(input: {
+  ownerId: string;
+  agentId: string;
+}): Promise<DispatchOutcome> {
+  const agent = await getAgent(input.ownerId, input.agentId);
+  if (!agent?.enabled) return { status: "idle" };
+
+  if (!config.e2eFakeFx) {
+    const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+    await finalizeDetachedFxTurn({ ownerId: input.ownerId, agent, sandbox });
+  }
+
+  const next = await dispatchNextAgentTask(input);
+  if (!config.e2eFakeFx && next.status === "idle") {
+    const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+    await sandbox.stop().catch(() => undefined);
+    return { status: "idle" };
+  }
+  if (config.e2eFakeFx && next.status === "completed") {
+    return settleCompletedAgentTask(input);
+  }
+  return next;
+}
+
+export async function dispatchAllQueuedAgentTasks(ownerId: string): Promise<void> {
+  const agents = await listAgents(ownerId);
+  await Promise.allSettled(
+    agents.filter((agent) => agent.enabled).map((agent) =>
+      dispatchNextAgentTask({ ownerId, agentId: agent.id })
+    ),
+  );
+}

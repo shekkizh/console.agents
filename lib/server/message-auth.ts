@@ -1,15 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { requireConsoleInternalSecret } from "@/lib/server/config";
 
-export interface MessageWakeClaims {
-  ownerId: string;
-  targetAgentId: string;
-  conversationId: string;
-  messageId: string;
-  fromAgentId: string;
-  expiresAt: number;
-}
-
 export interface AgentMessageClaims {
   ownerId: string;
   agentId: string;
@@ -27,8 +18,8 @@ function signature(payload: string): Buffer {
   return createHmac("sha256", requireConsoleInternalSecret()).update(payload).digest();
 }
 
-function signedToken(kind: "wake" | "agent", claims: object): string {
-  const payload = encode(JSON.stringify({ kind, ...claims }));
+function signedToken(claims: object): string {
+  const payload = encode(JSON.stringify({ kind: "agent", ...claims }));
   return `${payload}.${signature(payload).toString("base64url")}`;
 }
 
@@ -54,43 +45,11 @@ function verifiedPayload(token: string): Record<string, unknown> | undefined {
   }
 }
 
-export function createMessageWakeToken(
-  input: Omit<MessageWakeClaims, "expiresAt">,
-  now = Date.now(),
-): string {
-  return signedToken("wake", { ...input, expiresAt: now + 5 * 60_000 });
-}
-
-export function verifyMessageWakeToken(
-  token: string,
-  now = Date.now(),
-): MessageWakeClaims | undefined {
-  const value = verifiedPayload(token);
-  if (!value || value.kind !== "wake") return;
-  const claims = value as unknown as MessageWakeClaims;
-  if (
-    typeof claims.ownerId !== "string" || !claims.ownerId ||
-    typeof claims.targetAgentId !== "string" || !claims.targetAgentId ||
-    typeof claims.conversationId !== "string" || !claims.conversationId ||
-    typeof claims.messageId !== "string" || !claims.messageId ||
-    typeof claims.fromAgentId !== "string" || !claims.fromAgentId ||
-    !Number.isFinite(claims.expiresAt) || claims.expiresAt <= now
-  ) return;
-  return {
-    ownerId: claims.ownerId,
-    targetAgentId: claims.targetAgentId,
-    conversationId: claims.conversationId,
-    messageId: claims.messageId,
-    fromAgentId: claims.fromAgentId,
-    expiresAt: claims.expiresAt,
-  };
-}
-
 export function createAgentMessageToken(
   input: Omit<AgentMessageClaims, "expiresAt">,
   now = Date.now(),
 ): string {
-  return signedToken("agent", { ...input, expiresAt: now + 2 * 60 * 60_000 });
+  return signedToken({ ...input, expiresAt: now + 8 * 60 * 60_000 });
 }
 
 export function verifyAgentMessageToken(
@@ -119,4 +78,3 @@ export function verifyAgentMessageToken(
     expiresAt: claims.expiresAt,
   };
 }
-

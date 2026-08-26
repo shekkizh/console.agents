@@ -1,10 +1,11 @@
-import { Client, ClientError } from "eve/client";
-import type { SandboxSession } from "eve/sandbox";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { CapturedArtifact } from "@/lib/server/artifact-capture";
-import { createMessageWakeToken } from "@/lib/server/message-auth";
+import type { AgentSandbox } from "@/lib/server/agent-sandbox";
 import {
   claimConversationMessages,
+  getConversationMessage,
+  isMessageDeliveryPending,
   listMessageArtifacts,
   listReachableAgents,
   markMessageDelivery,
@@ -13,8 +14,7 @@ import {
   resolveAgentRecipient,
   type ConversationMessage,
 } from "@/lib/server/message-store";
-import { consoleInternalUrl } from "@/lib/server/config";
-import { getAgent, resetAgentSession } from "@/lib/server/agent-store";
+import { getAgent } from "@/lib/server/agent-store";
 
 const sendSchema = z.object({
   to: z.string().trim().min(1),
@@ -31,6 +31,20 @@ const waitSchema = z.object({
   timeout_s: z.number().finite().min(0).max(3_600).default(3_600),
 }).strict();
 
+const progressSchema = z.object({
+  content: z.string().trim().min(1).max(100_000),
+  summary: z.string().trim().min(1).max(500).optional(),
+  idempotency_key: z.string().trim().min(1).max(100).optional(),
+}).strict();
+
+const completeSchema = z.object({
+  content: z.string().trim().min(1).max(100_000),
+  summary: z.string().trim().min(1).max(500).optional(),
+  session_id: z.string().trim().regex(/^[A-Za-z0-9._:-]{1,200}$/).optional(),
+}).strict();
+
+const API_LONG_POLL_SECONDS = 20;
+
 export interface AgentMessageContext {
   ownerId: string;
   agentId: string;
@@ -38,6 +52,123 @@ export interface AgentMessageContext {
   incomingMessageId?: string;
   incomingFromAgentId?: string;
   abortSignal?: AbortSignal;
+}
+
+function correlatedMessageId(
+  kind: string,
+  context: AgentMessageContext,
+  requestId: string,
+): string {
+  const hex = createHash("sha256")
+    .update(`${kind}:\0${context.ownerId}:\0${context.agentId}:\0${requestId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+async function correlatedRequest(context: AgentMessageContext): Promise<ConversationMessage> {
+  if (!context.incomingMessageId) {
+    throw new Error("This activation is not correlated with an incoming task");
+  }
+  const request = await getConversationMessage(context.ownerId, context.incomingMessageId);
+  if (
+    !request ||
+    request.conversationId !== context.conversationId ||
+    request.recipientType !== "agent" ||
+    request.recipientId !== context.agentId
+  ) {
+    throw new Error("The correlated task is unavailable");
+  }
+  return request;
+}
+
+function replyTarget(context: AgentMessageContext, request: ConversationMessage) {
+  return request.senderType === "agent"
+    ? { recipientType: "agent" as const, recipientId: request.senderId }
+    : { recipientType: "human" as const, recipientId: context.ownerId };
+}
+
+async function executeTaskProgress(
+  context: AgentMessageContext,
+  rawArguments: Record<string, unknown>,
+  artifacts: readonly CapturedArtifact[],
+) {
+  const args = progressSchema.parse(rawArguments);
+  const request = await correlatedRequest(context);
+  if (!await isMessageDeliveryPending(context.ownerId, request.id, context.agentId)) {
+    throw new Error("The correlated task is no longer running");
+  }
+  const target = replyTarget(context, request);
+  const progress = await publishConversationMessage({
+    ownerId: context.ownerId,
+    id: correlatedMessageId(
+      `progress:${args.idempotency_key ?? args.content}`,
+      context,
+      request.id,
+    ),
+    conversationId: context.conversationId,
+    senderType: "agent",
+    senderId: context.agentId,
+    ...target,
+    inReplyTo: request.id,
+    content: args.content,
+    summary: args.summary,
+    metadata: { activity: "progress" },
+    artifacts,
+  });
+  return {
+    status: "delivered",
+    messageId: progress.id,
+    requestId: request.id,
+    conversationId: progress.conversationId,
+  };
+}
+
+async function executeTaskCompletion(
+  context: AgentMessageContext,
+  rawArguments: Record<string, unknown>,
+  artifacts: readonly CapturedArtifact[],
+) {
+  const args = completeSchema.parse(rawArguments);
+  const request = await correlatedRequest(context);
+  const responseId = correlatedMessageId("complete", context, request.id);
+  const existing = await getConversationMessage(context.ownerId, responseId);
+  if (existing) {
+    await markMessageDelivery(context.ownerId, request.id, context.agentId, "completed");
+    return {
+      status: "already_completed",
+      messageId: existing.id,
+      requestId: request.id,
+      conversationId: existing.conversationId,
+    };
+  }
+  if (!await isMessageDeliveryPending(context.ownerId, request.id, context.agentId)) {
+    throw new Error("The correlated task is no longer running");
+  }
+  const target = replyTarget(context, request);
+  const response = await publishConversationMessage({
+    ownerId: context.ownerId,
+    id: responseId,
+    conversationId: context.conversationId,
+    senderType: "agent",
+    senderId: context.agentId,
+    ...target,
+    inReplyTo: request.id,
+    content: args.content,
+    summary: args.summary,
+    metadata: {
+      activity: "completion",
+      ...(args.session_id ? { sessionId: args.session_id } : {}),
+    },
+    artifacts,
+  });
+  await markMessageDelivery(context.ownerId, request.id, context.agentId, "completed");
+  return {
+    status: "completed",
+    messageId: response.id,
+    requestId: request.id,
+    conversationId: response.conversationId,
+  };
 }
 
 function safeFilename(value: string): string {
@@ -49,19 +180,19 @@ function artifactPath(messageId: string, artifact: { id: string; name: string })
 }
 
 export async function materializeMessageArtifacts(
-  input: { ownerId: string; sandbox: SandboxSession },
+  input: { ownerId: string; sandbox: AgentSandbox },
   messageId: string,
 ): Promise<Array<{ id: string; path: string; title: string; mediaType: string; size: number }>> {
   const artifacts = await listMessageArtifacts(input.ownerId, messageId);
   if (artifacts.length === 0) return [];
   const prepared = await input.sandbox.run({
-    command: `mkdir -p /workspace/.console/inbox/${messageId}`,
+    command: `mkdir -p '${input.sandbox.root}/.console/inbox/${messageId}'`,
   });
   if (prepared.exitCode !== 0) throw new Error("Unable to prepare the message artifact inbox");
   const result = [];
   for (const artifact of artifacts) {
     const path = artifactPath(messageId, artifact);
-    await input.sandbox.writeBinaryFile({ path, content: artifact.content });
+    await input.sandbox.writeBinaryFile(path, artifact.content);
     result.push({
       id: artifact.id,
       path,
@@ -126,60 +257,11 @@ export async function formatMessageEnvelope(input: {
   return lines.join("\n");
 }
 
-export async function wakeMessage(input: {
-  ownerId: string;
-  message: ConversationMessage;
-}): Promise<void> {
-  if (input.message.recipientType !== "agent") return;
-  const target = await getAgent(input.ownerId, input.message.recipientId);
-  if (!target?.enabled) throw new Error("Recipient agent is unavailable");
-  const token = createMessageWakeToken({
-    ownerId: input.ownerId,
-    targetAgentId: target.id,
-    conversationId: input.message.conversationId,
-    messageId: input.message.id,
-    fromAgentId: input.message.senderId,
-  });
-  const client = new Client({
-    host: consoleInternalUrl(),
-    auth: { bearer: token },
-    redirect: "error",
-    headers: {
-      "x-console-agent-id": target.id,
-      "x-console-conversation-id": input.message.conversationId,
-      "x-console-message-id": input.message.id,
-      "x-console-message-wake": "1",
-    },
-  });
-  const envelope = await formatMessageEnvelope(input);
-  if (!target.eveSessionId) {
-    await client.sessions.create({ message: envelope, turnPolicy: "queue" });
-  } else {
-    try {
-      await client.sessions.attach(target.eveSessionId).send(envelope, { turnPolicy: "queue" });
-    } catch (error) {
-      if (!(error instanceof ClientError) || error.code !== "session_not_active") throw error;
-      const recovered = await resetAgentSession(input.ownerId, target.id, target.eveSessionId);
-      if (recovered.eveSessionId) {
-        await client.sessions.attach(recovered.eveSessionId).send(envelope, { turnPolicy: "queue" });
-      } else {
-        await client.sessions.create({ message: envelope, turnPolicy: "queue" });
-      }
-    }
-  }
-  await markMessageDelivery(
-    input.ownerId,
-    input.message.id,
-    input.message.recipientId,
-    "dispatched",
-  );
-}
-
 async function waitForMessages(
   context: AgentMessageContext,
   filter: { fromAgentId?: string; inReplyTo?: string; timeoutSeconds: number },
 ) {
-  const deadline = Date.now() + filter.timeoutSeconds * 1_000;
+  const deadline = Date.now() + Math.min(filter.timeoutSeconds, API_LONG_POLL_SECONDS) * 1_000;
   const listener = await openMessageListener(context.ownerId, context.agentId, context.abortSignal);
   try {
     while (true) {
@@ -252,7 +334,13 @@ export async function executeMessageOperation(
       summary: args.summary,
       artifacts,
     });
-    if (!toHuman) await wakeMessage({ ownerId: context.ownerId, message });
+    if (!toHuman) {
+      const { dispatchNextAgentTask } = await import("@/lib/server/task-dispatcher");
+      await dispatchNextAgentTask({
+        ownerId: context.ownerId,
+        agentId: recipient.id,
+      });
+    }
     if (!waitForReply) {
       return {
         status: toHuman ? "delivered" : "queued",
@@ -291,6 +379,13 @@ export async function executeMessageOperation(
     };
   }
 
+  if (operation === "progress") {
+    return executeTaskProgress(context, rawArguments, artifacts);
+  }
+
+  if (operation === "complete") {
+    return executeTaskCompletion(context, rawArguments, artifacts);
+  }
+
   throw new Error(`Unknown message operation: ${operation}`);
 }
-

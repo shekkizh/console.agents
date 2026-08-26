@@ -1,5 +1,13 @@
 import type { AgentProfile } from "@/lib/types";
-import type { FxTurnOutcome } from "@/lib/server/fx-runtime";
+import type { CapturedArtifact } from "@/lib/server/artifact-capture";
+
+interface E2EFakeFxOutcome {
+  output: string;
+  model: string;
+  sessionId: string;
+  steps: number;
+  artifacts: CapturedArtifact[];
+}
 
 const fakeRequestPattern = /^E2E_FAKE delay=(\d{1,5}) reply=([A-Za-z0-9_-]{1,100})$/;
 
@@ -32,17 +40,14 @@ export async function runE2EFakeFxTurn(input: {
   agent: AgentProfile;
   prompt: string;
   abortSignal?: AbortSignal;
-}): Promise<FxTurnOutcome> {
+}): Promise<E2EFakeFxOutcome> {
   const request = parseE2EFakeRequest(input.prompt);
   await waitForDelay(request.delayMs, input.abortSignal);
   return {
     output: request.reply,
-    exitCode: 0,
     model: "e2e/fake-fx",
     sessionId: `e2e-${input.agent.id}`,
     steps: 1,
-    toolCalls: [],
-    controlPlaneChanges: [],
     artifacts: [],
   };
 }

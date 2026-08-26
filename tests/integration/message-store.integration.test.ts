@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { neon } from "@neondatabase/serverless";
 import {
-  claimAgentSession,
   createAgent,
   ensureDefaultAgent,
 } from "../../lib/server/agent-store.ts";
@@ -75,7 +74,6 @@ test(
       (await nextPendingAgentMessage({
         ownerId,
         agentId: sender.id,
-        conversationId: conversation.id,
       }))?.id,
       humanMessage.id,
     );
@@ -206,7 +204,6 @@ test(
     });
 
     const agent = await ensureDefaultAgent(ownerId);
-    const claimedAgent = await claimAgentSession(ownerId, agent.id, `session-${suffix}`);
     const conversation = await createConversation(ownerId, agent.id);
     const request = await publishConversationMessage({
       ownerId,
@@ -223,7 +220,6 @@ test(
       (await nextPendingAgentMessage({
         ownerId,
         agentId: agent.id,
-        conversationId: conversation.id,
       }))?.id,
       request.id,
     );
@@ -234,7 +230,7 @@ test(
     assert.equal(stopped.conversation.status, "failed");
     assert.deepEqual(stopped.targets, [{
       agentId: agent.id,
-      eveSessionId: claimedAgent.eveSessionId,
+      messageId: request.id,
     }]);
     assert.equal(await isMessageDeliveryPending(ownerId, request.id, agent.id), false);
     assert.equal(
@@ -245,7 +241,6 @@ test(
       await nextPendingAgentMessage({
         ownerId,
         agentId: agent.id,
-        conversationId: conversation.id,
       }),
       undefined,
     );
@@ -264,7 +259,6 @@ test(
       (await nextPendingAgentMessage({
         ownerId,
         agentId: agent.id,
-        conversationId: conversation.id,
       }))?.id,
       followUp.id,
     );

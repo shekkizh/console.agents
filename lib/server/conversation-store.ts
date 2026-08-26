@@ -18,8 +18,6 @@ interface ConversationRow {
   agent_id: string;
   agent_name: string;
   title: string;
-  eve_session_id: string | null;
-  runtime_version: number;
   status: ConversationStatus;
   created_at: string | Date;
   updated_at: string | Date;
@@ -40,8 +38,7 @@ const selectColumns = `
     ORDER BY message.created_at ASC
     LIMIT 1
   ), c.title) ELSE c.title END AS title,
-  a.eve_session_id,
-  c.runtime_version, c.status, c.created_at, c.updated_at
+  c.status, c.created_at, c.updated_at
 `;
 
 function toConversation(row: ConversationRow): ConversationProfile {
@@ -50,7 +47,6 @@ function toConversation(row: ConversationRow): ConversationProfile {
     agentId: row.agent_id,
     agentName: row.agent_name,
     title: row.title,
-    eveSessionId: row.eve_session_id,
     status: row.status,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
@@ -62,7 +58,7 @@ export async function listConversations(ownerId: string): Promise<ConversationPr
     `SELECT ${selectColumns}
      FROM conversations c
      JOIN agents a ON a.id = c.agent_id
-     WHERE c.owner_id = $1 AND c.visibility = 'user'
+     WHERE c.owner_id = $1
      ORDER BY c.updated_at DESC, c.created_at DESC`,
     [ownerId],
   );
@@ -80,9 +76,9 @@ export async function createConversation(
   const rows = await database().query(
     `INSERT INTO conversations (id, owner_id, agent_id)
      VALUES ($1, $2, $3)
-     RETURNING id, agent_id, $4::text AS agent_name, title, $5::text AS eve_session_id,
-       runtime_version, status, created_at, updated_at`,
-    [id, ownerId, agentId, agent.name, agent.eveSessionId],
+     RETURNING id, agent_id, $4::text AS agent_name, title,
+       status, created_at, updated_at`,
+    [id, ownerId, agentId, agent.name],
   );
   return toConversation(rows[0] as ConversationRow);
 }
@@ -106,7 +102,7 @@ export async function deleteConversation(ownerId: string, conversationId: string
 
 export interface ConversationStopTarget {
   agentId: string;
-  eveSessionId: string;
+  messageId: string;
 }
 
 export async function stopConversation(
@@ -119,16 +115,13 @@ export async function stopConversation(
 }> {
   const sql = database();
   const targetRows = await sql.query(
-    `SELECT DISTINCT agent.id AS agent_id, agent.eve_session_id
+    `SELECT DISTINCT delivery.recipient_id AS agent_id, message.id AS message_id
      FROM conversation_messages message
      JOIN message_deliveries delivery
        ON delivery.owner_id = message.owner_id AND delivery.message_id = message.id
-     JOIN agents agent
-       ON agent.owner_id = message.owner_id AND agent.id = delivery.recipient_id
      WHERE message.owner_id = $1 AND message.conversation_id = $2
        AND delivery.recipient_type = 'agent'
-       AND delivery.state = 'claimed'
-       AND agent.eve_session_id IS NOT NULL`,
+       AND delivery.state IN ('claimed', 'running')`,
     [ownerId, conversationId],
   );
   const rows = await sql.query(
@@ -143,7 +136,7 @@ export async function stopConversation(
          AND message.id = delivery.message_id
          AND message.conversation_id = target.id
          AND delivery.recipient_type = 'agent'
-         AND delivery.state IN ('queued', 'dispatched', 'claimed')
+         AND delivery.state IN ('queued', 'claimed', 'running')
        RETURNING delivery.id
      ), updated AS (
        UPDATE conversations conversation
@@ -173,7 +166,7 @@ export async function stopConversation(
     ),
     targets: targetRows.map((row) => ({
       agentId: String(row.agent_id),
-      eveSessionId: String(row.eve_session_id),
+      messageId: String(row.message_id),
     })),
   };
 }

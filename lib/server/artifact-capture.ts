@@ -1,33 +1,10 @@
 import path from "node:path";
-import type { SandboxSession } from "eve/sandbox";
-import { z } from "zod";
 import type { AgentArtifactKind } from "@/lib/types";
 
-export const ARTIFACT_MANIFEST_PATH = ".console/artifacts.json";
-export const ARTIFACT_PREVIEW_DIRECTORY = ".console/previews";
 export const A2A_OUTBOX_DIRECTORY = ".console/outbox";
-export const EMPTY_ARTIFACT_MANIFEST = '{"files":[]}\n';
 
-const MAX_ARTIFACTS = 4;
-const MAX_MANIFEST_BYTES = 16_384;
 const MAX_BINARY_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
-const MAX_TOTAL_BYTES = 12 * 1024 * 1024;
-
-const manifestSchema = z
-  .object({
-    files: z
-      .array(
-        z
-          .object({
-            path: z.string().trim().min(1).max(300),
-            title: z.string().trim().min(1).max(120).optional(),
-          })
-          .strict(),
-      )
-      .max(MAX_ARTIFACTS),
-  })
-  .strict();
 
 const imageTypes = new Map([
   [".png", "image/png"],
@@ -73,14 +50,6 @@ function artifactType(filePath: string): ArtifactType | undefined {
   return undefined;
 }
 
-export function validArtifactPath(value: string): string | undefined {
-  if (value.startsWith("/") || value.includes("\\") || /[\0-\x1f\x7f]/.test(value)) return;
-  const normalized = path.posix.normalize(value);
-  if (normalized === "." || normalized === ".." || normalized.startsWith("../")) return;
-  if (!normalized.startsWith(`${ARTIFACT_PREVIEW_DIRECTORY}/`)) return;
-  return normalized;
-}
-
 export function validPeerArtifactPath(value: string): string | undefined {
   if (value.startsWith("/") || value.includes("\\") || /[\0-\x1f\x7f]/.test(value)) return;
   const normalized = path.posix.normalize(value);
@@ -116,38 +85,6 @@ export function capturePeerArtifact(input: {
   };
 }
 
-export function parseArtifactManifest(raw: string): Array<{ path: string; title?: string }> {
-  const parsed = manifestSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) return [];
-  return parsed.data.files.flatMap((file) => {
-    const normalized = validArtifactPath(file.path);
-    return normalized ? [{ path: normalized, title: file.title }] : [];
-  });
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-async function sandboxFileSize(
-  sandbox: SandboxSession,
-  filePath: string,
-  previewOnly = false,
-): Promise<number | undefined> {
-  const absolutePath = `/workspace/${filePath}`;
-  const boundary = previewOnly
-    ? 'case "$resolved" in /workspace/.console/previews/*) ;; *) exit 3 ;; esac'
-    : `test "$resolved" = ${shellQuote(absolutePath)} || exit 3`;
-  const command = `resolved="$(realpath -e -- ${shellQuote(absolutePath)})" || exit 2
-${boundary}
-test -f "$resolved" || exit 4
-stat -c '%s' -- "$resolved"`;
-  const result = await sandbox.run({ command });
-  if (result.exitCode !== 0) return;
-  const size = Number(result.stdout.trim());
-  return Number.isSafeInteger(size) && size >= 0 ? size : undefined;
-}
-
 function startsWith(content: Uint8Array, expected: readonly number[], offset = 0): boolean {
   return expected.every((byte, index) => content[offset + index] === byte);
 }
@@ -178,45 +115,4 @@ function validUtf8Text(content: Uint8Array): boolean {
   } catch {
     return false;
   }
-}
-
-export async function collectPreviewArtifacts(
-  sandbox: SandboxSession,
-): Promise<CapturedArtifact[]> {
-  const manifestSize = await sandboxFileSize(sandbox, ARTIFACT_MANIFEST_PATH);
-  if (manifestSize === undefined || manifestSize > MAX_MANIFEST_BYTES) return [];
-  const rawManifest = await sandbox.readTextFile({ path: ARTIFACT_MANIFEST_PATH });
-  if (!rawManifest?.trim()) return [];
-
-  let files: Array<{ path: string; title?: string }>;
-  try {
-    files = parseArtifactManifest(rawManifest);
-  } catch {
-    return [];
-  }
-
-  const artifacts: CapturedArtifact[] = [];
-  let totalBytes = 0;
-  for (const file of files) {
-    const type = artifactType(file.path);
-    if (!type) continue;
-    const size = await sandboxFileSize(sandbox, file.path, true);
-    if (size === undefined || size > type.maxBytes || totalBytes + size > MAX_TOTAL_BYTES) continue;
-    const content = await sandbox.readBinaryFile({ path: file.path });
-    if (!content || content.byteLength !== size) continue;
-    if (type.kind === "text" ? !validUtf8Text(content) : !validBinarySignature(content, type.mediaType)) {
-      continue;
-    }
-    const name = path.posix.basename(file.path);
-    artifacts.push({
-      path: file.path,
-      name,
-      title: file.title ?? name,
-      mediaType: type.mediaType,
-      kind: type.kind,
-      content,
-    });
-    totalBytes += size;
-  }
-  return artifacts;
 }

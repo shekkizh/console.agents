@@ -1,0 +1,3 @@
+export const FX_SANDBOX_TIMEOUT_MS = 6 * 60 * 60_000;
+export const FX_CLAIM_STALE_MS = 5 * 60_000;
+export const FX_STALE_DELIVERY_MS = FX_SANDBOX_TIMEOUT_MS + 5 * 60_000;

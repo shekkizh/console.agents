@@ -10,7 +10,6 @@ const agent = {
   instructions: "Run deterministic tests.",
   fxConfig: { model: "test/model", maxSteps: 1, networkAccess: "full", networkAllowlist: [], skills: [], mcpServers: {} },
   configVersion: 1,
-  eveSessionId: null,
   createdByAgentId: null,
   enabled: true,
   createdAt: "2026-08-20T00:00:00.000Z",
