@@ -1,4 +1,4 @@
-const DEFAULT_FX_MODEL = "zai/glm-5.2";
+const DEFAULT_FX_MODEL = "minimax/minimax-m3-free";
 const e2eTestMode = process.env.NODE_ENV !== "production" && process.env.E2E_TEST_MODE === "1";
 
 export const config = {

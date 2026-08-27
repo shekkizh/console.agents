@@ -104,7 +104,7 @@ To create a persistent Console agent or update your own registered configuration
       "name": "Researcher",
       "specialty": "Evidence-backed research",
       "instructions": "Detailed durable operating instructions",
-      "model": "zai/glm-5.2"
+      "model": "minimax/minimax-m3-free"
     }
   ]
 }
