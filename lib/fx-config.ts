@@ -4,7 +4,6 @@ export function fxProjectConfig(agent: AgentProfile): string {
   return `${JSON.stringify(
     {
       model: agent.fxConfig.model,
-      max_agent_steps: agent.fxConfig.maxSteps,
       sandbox: "none",
     },
     null,

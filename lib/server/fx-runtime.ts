@@ -37,7 +37,6 @@ const controlRequestSchema = z.discriminatedUnion("type", [
     specialty: z.string().trim().min(2).max(160),
     instructions: z.string().trim().min(8).max(20_000),
     model: z.string().trim().min(3).max(200).optional(),
-    maxSteps: z.number().int().min(1).max(128).optional(),
     ...optionalFxCapabilitiesSchema,
   }),
   z.object({
@@ -47,7 +46,6 @@ const controlRequestSchema = z.discriminatedUnion("type", [
     specialty: z.string().trim().min(2).max(160).optional(),
     instructions: z.string().trim().min(8).max(20_000).optional(),
     model: z.string().trim().min(3).max(200).optional(),
-    maxSteps: z.number().int().min(1).max(128).optional(),
     ...optionalFxCapabilitiesSchema,
   }),
 ]);
@@ -106,14 +104,13 @@ To create a persistent Console agent or update your own registered configuration
       "name": "Researcher",
       "specialty": "Evidence-backed research",
       "instructions": "Detailed durable operating instructions",
-      "model": "zai/glm-5.2",
-      "maxSteps": 48
+      "model": "zai/glm-5.2"
     }
   ]
 }
 \`\`\`
 
-The other request type is \`update-self\`; it accepts \`requestId\` and profile or runtime settings such as \`model\`, \`maxSteps\`, \`skills\`, and \`mcpServers\`. Network access can only be changed by the user in Agent settings. At most five requests are accepted per turn. Agent Console validates and applies them after your turn, then clears the file. Use \`.console/agents.json\` to inspect the current roster. Creating only a local process or subagent does not register a persistent Console agent.
+The other request type is \`update-self\`; it accepts \`requestId\` and profile or runtime settings such as \`model\`, \`skills\`, and \`mcpServers\`. Network access can only be changed by the user in Agent settings. At most five requests are accepted per turn. Agent Console validates and applies them after your turn, then clears the file. Use \`.console/agents.json\` to inspect the current roster. Creating only a local process or subagent does not register a persistent Console agent.
 `;
 }
 
@@ -216,7 +213,6 @@ async function applyControlRequests(input: {
           specialty: request.specialty,
           instructions: request.instructions,
           model: request.model,
-          maxSteps: request.maxSteps,
           skills: request.skills,
           mcpServers: request.mcpServers,
           createdByAgentId: input.agent.id,
@@ -236,7 +232,6 @@ async function applyControlRequests(input: {
       specialty: request.specialty,
       instructions: request.instructions,
       model: request.model,
-      maxSteps: request.maxSteps,
       skills: request.skills,
       mcpServers: request.mcpServers,
     };

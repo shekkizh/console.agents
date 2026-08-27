@@ -8,6 +8,9 @@ import type { AgentProfile, FxNetworkAccess } from "@/lib/types";
 const AI_GATEWAY_HOST = "ai-gateway.vercel.sh";
 const INSTALL_HOSTS = ["github.com", "*.githubusercontent.com"];
 const SANDBOX_IMAGE = process.env.MICROSANDBOX_IMAGE ?? "python:3.13-bookworm";
+const VERCEL_ACQUIRE_TIMEOUT_MS = 60_000;
+const VERCEL_COMMAND_TIMEOUT_MS = 120_000;
+const VERCEL_SPAWN_TIMEOUT_MS = 60_000;
 const acquireLocks = new Map<string, Promise<AgentSandbox>>();
 
 export interface SandboxCommandResult {
@@ -84,30 +87,63 @@ function resolvedPath(root: string, value: string): string {
   return root + "/" + normalized;
 }
 
+async function withVercelTimeout<T>(
+  label: string,
+  timeoutMs: number,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await operation(controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`${label} timed out after ${Math.ceil(timeoutMs / 1_000)} seconds`, {
+        cause: error,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function acquireVercelSandbox(
   ownerId: string,
   agent: AgentProfile,
 ): Promise<AgentSandbox> {
   const { Sandbox } = await import("@vercel/sandbox");
-  const sandbox = await Sandbox.getOrCreate({
-    name: stableSandboxName(ownerId, agent.id),
-    image: "vercel/sandbox/universal:latest",
-    timeout: FX_SANDBOX_TIMEOUT_MS,
-    persistent: true,
-    keepLastSnapshots: {
-      count: 1,
-      expiration: 7 * 24 * 60 * 60_000,
-      deleteEvicted: true,
-    },
-    networkPolicy: vercelNetworkPolicy(
-      agent.fxConfig.networkAccess,
-      agent.fxConfig.networkAllowlist,
-    ),
-    tags: {
-      application: "agent-console",
-      agent: createHash("sha256").update(agent.id).digest("hex").slice(0, 24),
-    },
-    resume: true,
+  const name = stableSandboxName(ownerId, agent.id);
+  console.info("agent-sandbox.acquire.started", { sandbox: name, backend: "vercel" });
+  const sandbox = await withVercelTimeout(
+    "Vercel sandbox acquisition",
+    VERCEL_ACQUIRE_TIMEOUT_MS,
+    (signal) => Sandbox.getOrCreate({
+      name,
+      image: "vercel/sandbox/universal:latest",
+      timeout: FX_SANDBOX_TIMEOUT_MS,
+      persistent: true,
+      keepLastSnapshots: {
+        count: 1,
+        expiration: 7 * 24 * 60 * 60_000,
+        deleteEvicted: true,
+      },
+      networkPolicy: vercelNetworkPolicy(
+        agent.fxConfig.networkAccess,
+        agent.fxConfig.networkAllowlist,
+      ),
+      tags: {
+        application: "agent-console",
+        agent: createHash("sha256").update(agent.id).digest("hex").slice(0, 24),
+      },
+      resume: true,
+      signal,
+    }),
+  );
+  console.info("agent-sandbox.acquire.completed", {
+    sandbox: name,
+    backend: "vercel",
+    status: sandbox.status,
   });
   const root = sandbox.cwd || "/vercel/sandbox";
 
@@ -115,12 +151,18 @@ async function acquireVercelSandbox(
     id: sandbox.name,
     root,
     async run(input) {
-      const result = await sandbox.runCommand({
-        cmd: "bash",
-        args: ["-lc", input.command],
-        cwd: input.cwd ?? root,
-        env: input.env,
-      });
+      const result = await withVercelTimeout(
+        "Vercel sandbox command",
+        VERCEL_COMMAND_TIMEOUT_MS,
+        (signal) => sandbox.runCommand({
+          cmd: "bash",
+          args: ["-lc", input.command],
+          cwd: input.cwd ?? root,
+          env: input.env,
+          signal,
+          timeoutMs: VERCEL_COMMAND_TIMEOUT_MS,
+        }),
+      );
       return {
         exitCode: result.exitCode,
         stdout: await result.stdout(),
@@ -128,13 +170,18 @@ async function acquireVercelSandbox(
       };
     },
     async spawn(input) {
-      const command = await sandbox.runCommand({
-        cmd: "bash",
-        args: ["-lc", input.command],
-        cwd: input.cwd ?? root,
-        env: input.env,
-        detached: true,
-      });
+      const command = await withVercelTimeout(
+        "Vercel sandbox process launch",
+        VERCEL_SPAWN_TIMEOUT_MS,
+        (signal) => sandbox.runCommand({
+          cmd: "bash",
+          args: ["-lc", input.command],
+          cwd: input.cwd ?? root,
+          env: input.env,
+          detached: true,
+          signal,
+        }),
+      );
       return { id: command.cmdId };
     },
     async readTextFile(path) {

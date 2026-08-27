@@ -20,7 +20,6 @@ export interface FxMcpServerConfig {
 
 export interface FxAgentConfig {
   model: string;
-  maxSteps: number;
   networkAccess: FxNetworkAccess;
   networkAllowlist: string[];
   skills: FxSkillConfig[];

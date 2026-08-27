@@ -17,7 +17,6 @@ const agent: AgentProfile = {
   instructions: "Work carefully and verify the result.",
   fxConfig: {
     model: "zai/glm-5.2",
-    maxSteps: 32,
     networkAccess: "full",
     networkAllowlist: [],
     skills: [],
@@ -33,7 +32,6 @@ const agent: AgentProfile = {
 test("serializes agent workspace configuration", () => {
   assert.deepEqual(JSON.parse(fxProjectConfig(agent)), {
     model: "zai/glm-5.2",
-    max_agent_steps: 32,
     sandbox: "none",
   });
 });

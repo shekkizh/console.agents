@@ -54,13 +54,13 @@ export async function dispatchNextAgentTask(input: {
     };
   }
 
-  await markMessageDelivery(input.ownerId, request.id, input.agentId, "running");
   if (!await isMessageDeliveryPending(input.ownerId, request.id, input.agentId)) {
     return { status: "idle" };
   }
 
   try {
     if (config.e2eFakeFx) {
+      await markMessageDelivery(input.ownerId, request.id, input.agentId, "running");
       const result = await runE2EFakeFxTurn({ agent, prompt: request.content });
       if (!await isMessageDeliveryPending(input.ownerId, request.id, input.agentId)) {
         return { status: "idle" };
@@ -83,7 +83,16 @@ export async function dispatchNextAgentTask(input: {
       return { status: "completed", messageId: request.id };
     }
 
+    console.info("agent-task.launch.started", {
+      messageId: request.id,
+      agentId: input.agentId,
+    });
     const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+    console.info("agent-task.sandbox.ready", {
+      messageId: request.id,
+      agentId: input.agentId,
+      sandboxId: sandbox.id,
+    });
     const launch = await launchFxTurn({
       ownerId: input.ownerId,
       agent,
@@ -93,6 +102,13 @@ export async function dispatchNextAgentTask(input: {
       incomingFromAgentId: request.senderType === "agent" ? request.senderId : undefined,
       sandbox,
     });
+    await markMessageDelivery(input.ownerId, request.id, input.agentId, "running");
+    console.info("agent-task.launch.completed", {
+      messageId: request.id,
+      agentId: input.agentId,
+      sandboxId: launch.sandboxId,
+      processId: launch.processId,
+    });
     return {
       status: "started",
       messageId: request.id,
@@ -101,6 +117,11 @@ export async function dispatchNextAgentTask(input: {
     };
   } catch (error) {
     const diagnostic = error instanceof Error ? error.name + ": " + error.message : String(error);
+    console.error("agent-task.launch.failed", {
+      messageId: request.id,
+      agentId: input.agentId,
+      diagnostic,
+    });
     if (await isMessageDeliveryPending(input.ownerId, request.id, input.agentId)) {
       await publishConversationMessage({
         ownerId: input.ownerId,

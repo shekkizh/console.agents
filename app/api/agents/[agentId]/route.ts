@@ -10,7 +10,6 @@ const updateSchema = z
     specialty: z.string().trim().min(2).max(160).optional(),
     instructions: z.string().trim().min(8).max(20_000).optional(),
     model: z.string().trim().min(3).max(200).optional(),
-    maxSteps: z.number().int().min(1).max(128).optional(),
     ...optionalFxNetworkSchema,
     ...optionalFxCapabilitiesSchema,
     enabled: z.boolean().optional(),

@@ -22,7 +22,6 @@ export interface AgentUpdate {
   specialty?: string;
   instructions?: string;
   model?: string;
-  maxSteps?: number;
   networkAccess?: FxNetworkAccess;
   networkAllowlist?: string[];
   skills?: FxSkillConfig[];
@@ -52,10 +51,6 @@ function normalizeFxConfig(value: unknown): FxAgentConfig {
       typeof configValue.model === "string" && configValue.model.trim()
         ? configValue.model
         : config.defaultFxModel,
-    maxSteps:
-      typeof configValue.maxSteps === "number" && Number.isInteger(configValue.maxSteps)
-        ? Math.min(128, Math.max(1, configValue.maxSteps))
-        : 48,
     networkAccess,
     networkAllowlist: parsedNetworkAllowlist.success ? parsedNetworkAllowlist.data : [],
     skills: parsedSkills.success ? parsedSkills.data : [],
@@ -96,7 +91,7 @@ export async function ensureDefaultAgent(ownerId: string): Promise<AgentProfile>
     [
       id,
       ownerId,
-      JSON.stringify({ model: config.defaultFxModel, maxSteps: 48, networkAccess: "full", networkAllowlist: [], skills: [], mcpServers: {} }),
+      JSON.stringify({ model: config.defaultFxModel, networkAccess: "full", networkAllowlist: [], skills: [], mcpServers: {} }),
     ],
   );
   return toAgent(rows[0] as AgentRow);
@@ -137,7 +132,6 @@ export async function createAgent(
     specialty: string;
     instructions: string;
     model?: string;
-    maxSteps?: number;
     networkAccess?: FxNetworkAccess;
     networkAllowlist?: string[];
     skills?: FxSkillConfig[];
@@ -149,7 +143,6 @@ export async function createAgent(
   const id = `agent-${crypto.randomUUID()}`;
   const fxConfig: FxAgentConfig = {
     model: input.model ?? config.defaultFxModel,
-    maxSteps: input.maxSteps ?? 48,
     networkAccess: input.networkAccess ?? "full",
     networkAllowlist: input.networkAllowlist ?? [],
     skills: input.skills ?? [],
@@ -255,7 +248,6 @@ export async function updateAgent(
   if (!existing) throw new Error("Agent not found");
   const fxConfig: FxAgentConfig = {
     model: input.model ?? existing.fxConfig.model,
-    maxSteps: input.maxSteps ?? existing.fxConfig.maxSteps,
     networkAccess: input.networkAccess ?? existing.fxConfig.networkAccess,
     networkAllowlist: input.networkAllowlist ?? existing.fxConfig.networkAllowlist,
     skills: input.skills ?? existing.fxConfig.skills,
