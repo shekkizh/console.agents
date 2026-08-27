@@ -9,7 +9,6 @@ const createSchema = z.object({
   specialty: z.string().trim().min(2).max(160),
   instructions: z.string().trim().min(8).max(20_000),
   model: z.string().trim().min(3).max(200).optional(),
-  maxSteps: z.number().int().min(1).max(128).optional(),
   ...optionalFxNetworkSchema,
   ...optionalFxCapabilitiesSchema,
 });

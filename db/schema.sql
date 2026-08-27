@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS agents (
   name text NOT NULL,
   specialty text NOT NULL,
   instructions text NOT NULL DEFAULT '',
-  fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"networkAccess":"full","networkAllowlist":[]}'::jsonb,
+  fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","networkAccess":"full","networkAllowlist":[]}'::jsonb,
   config_version integer NOT NULL DEFAULT 1,
   created_by_agent_id text,
   enabled boolean NOT NULL DEFAULT true,
@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS agents (
   UNIQUE (owner_id, name)
 );
 
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"networkAccess":"full","networkAllowlist":[]}'::jsonb;
-ALTER TABLE agents ALTER COLUMN fx_config SET DEFAULT '{"model":"zai/glm-5.2","maxSteps":48,"networkAccess":"full","networkAllowlist":[]}'::jsonb;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.2","networkAccess":"full","networkAllowlist":[]}'::jsonb;
+ALTER TABLE agents ALTER COLUMN fx_config SET DEFAULT '{"model":"zai/glm-5.2","networkAccess":"full","networkAllowlist":[]}'::jsonb;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS config_version integer NOT NULL DEFAULT 1;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_by_agent_id text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true;

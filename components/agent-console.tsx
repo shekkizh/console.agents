@@ -799,7 +799,6 @@ function AgentDialog({
   const [specialty, setSpecialty] = useState(agent?.specialty ?? "");
   const [instructions, setInstructions] = useState(agent?.instructions ?? "");
   const [model, setModel] = useState(agent?.fxConfig.model ?? "zai/glm-5.2");
-  const [maxSteps, setMaxSteps] = useState(agent?.fxConfig.maxSteps ?? 48);
   const [networkAccess, setNetworkAccess] = useState<FxNetworkAccess>(agent?.fxConfig.networkAccess ?? "full");
   const [networkAllowlist, setNetworkAllowlist] = useState(
     (agent?.fxConfig.networkAllowlist ?? []).join("\n"),
@@ -841,7 +840,6 @@ function AgentDialog({
         specialty,
         instructions,
         model,
-        maxSteps,
         networkAccess,
         networkAllowlist: parsedNetworkAllowlist,
         skills: parsedSkills,
@@ -880,14 +878,10 @@ function AgentDialog({
             <Label htmlFor="agent-instructions">Durable instructions</Label>
             <Textarea id="agent-instructions" minLength={8} onChange={(event) => setInstructions(event.target.value)} required rows={6} value={instructions} />
           </div>
-          <div className="grid gap-4 sm:grid-cols-[1fr_8rem_12rem]">
+          <div className="grid gap-4 sm:grid-cols-[1fr_12rem]">
             <div className="grid gap-2">
               <Label htmlFor="agent-model">Model</Label>
               <Input id="agent-model" onChange={(event) => setModel(event.target.value)} required value={model} />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="agent-steps">Max steps</Label>
-              <Input id="agent-steps" max={128} min={1} onChange={(event) => setMaxSteps(Number(event.target.value))} required type="number" value={maxSteps} />
             </div>
             <div className="grid gap-2">
               <Label>Network access</Label>
