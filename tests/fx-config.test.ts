@@ -16,7 +16,7 @@ const agent: AgentProfile = {
   specialty: "Builds software",
   instructions: "Work carefully and verify the result.",
   fxConfig: {
-    model: "zai/glm-5.2",
+    model: "minimax/minimax-m3-free",
     networkAccess: "full",
     networkAllowlist: [],
     skills: [],
@@ -31,7 +31,7 @@ const agent: AgentProfile = {
 
 test("serializes agent workspace configuration", () => {
   assert.deepEqual(JSON.parse(fxProjectConfig(agent)), {
-    model: "zai/glm-5.2",
+    model: "minimax/minimax-m3-free",
     sandbox: "none",
   });
 });

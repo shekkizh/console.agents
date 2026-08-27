@@ -798,7 +798,7 @@ function AgentDialog({
   const [name, setName] = useState(agent?.name ?? "");
   const [specialty, setSpecialty] = useState(agent?.specialty ?? "");
   const [instructions, setInstructions] = useState(agent?.instructions ?? "");
-  const [model, setModel] = useState(agent?.fxConfig.model ?? "zai/glm-5.2");
+  const [model, setModel] = useState(agent?.fxConfig.model ?? "minimax/minimax-m3-free");
   const [networkAccess, setNetworkAccess] = useState<FxNetworkAccess>(agent?.fxConfig.networkAccess ?? "full");
   const [networkAllowlist, setNetworkAllowlist] = useState(
     (agent?.fxConfig.networkAllowlist ?? []).join("\n"),
