@@ -6,9 +6,11 @@ import { runE2EFakeFxTurn } from "@/lib/server/e2e-fx";
 import {
   finalizeDetachedFxTurn,
   launchFxTurn,
+  recoverDetachedFxCompletion,
 } from "@/lib/server/fx-runtime";
 import { executeMessageOperation, formatMessageEnvelope } from "@/lib/server/message-runtime";
 import {
+  getActiveConversationDelivery,
   hasActiveAgentDelivery,
   isMessageDeliveryPending,
   markMessageDelivery,
@@ -171,6 +173,43 @@ export async function settleCompletedAgentTask(input: {
     return settleCompletedAgentTask(input);
   }
   return next;
+}
+
+export async function recoverCompletedConversationTask(input: {
+  ownerId: string;
+  conversationId: string;
+}): Promise<DispatchOutcome> {
+  const delivery = await getActiveConversationDelivery(input.ownerId, input.conversationId);
+  if (!delivery) return { status: "idle" };
+  const agent = await getAgent(input.ownerId, delivery.agentId);
+  if (!agent?.enabled) return { status: "idle" };
+
+  const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+  const recovered = await recoverDetachedFxCompletion({
+    sandbox,
+    incomingMessageId: delivery.messageId,
+  });
+  if (!recovered || recovered === "running") {
+    return { status: "started", messageId: delivery.messageId, sandboxId: sandbox.id };
+  }
+
+  await executeMessageOperation(
+    {
+      ownerId: input.ownerId,
+      agentId: delivery.agentId,
+      conversationId: input.conversationId,
+      incomingMessageId: delivery.messageId,
+    },
+    "complete",
+    { content: recovered.content, session_id: recovered.sessionId },
+  );
+  console.info("agent-task.recovery.completed", {
+    messageId: delivery.messageId,
+    agentId: delivery.agentId,
+    conversationId: input.conversationId,
+    sessionId: recovered.sessionId,
+  });
+  return { status: "completed", messageId: delivery.messageId };
 }
 
 export async function dispatchAllQueuedAgentTasks(ownerId: string): Promise<void> {

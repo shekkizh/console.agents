@@ -511,6 +511,50 @@ export async function hasActiveAgentDelivery(
   return Boolean((rows[0] as { active?: boolean } | undefined)?.active);
 }
 
+export interface ActiveConversationDelivery {
+  messageId: string;
+  agentId: string;
+  runningAt: string;
+}
+
+export async function getActiveConversationDelivery(
+  ownerId: string,
+  conversationId: string,
+): Promise<ActiveConversationDelivery | undefined> {
+  const rows = await database().query(
+    `SELECT message.id AS message_id,
+            delivery.recipient_id AS agent_id,
+            delivery.running_at
+     FROM conversation_messages message
+     JOIN message_deliveries delivery
+       ON delivery.owner_id = message.owner_id
+      AND delivery.message_id = message.id
+     WHERE message.owner_id = $1
+       AND message.conversation_id = $2
+       AND delivery.recipient_type = 'agent'
+       AND delivery.state = 'running'
+       AND delivery.running_at IS NOT NULL
+     ORDER BY delivery.running_at DESC, delivery.id DESC
+     LIMIT 1`,
+    [ownerId, conversationId],
+  );
+  const row = rows[0] as {
+    message_id?: unknown;
+    agent_id?: unknown;
+    running_at?: string | Date;
+  } | undefined;
+  if (
+    typeof row?.message_id !== "string" ||
+    typeof row.agent_id !== "string" ||
+    !row.running_at
+  ) return;
+  return {
+    messageId: row.message_id,
+    agentId: row.agent_id,
+    runningAt: new Date(row.running_at).toISOString(),
+  };
+}
+
 export async function claimConversationMessages(input: {
   ownerId: string;
   agentId: string;
