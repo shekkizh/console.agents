@@ -256,6 +256,83 @@ function fxJobKey(requestId: string): string {
   return createHash("sha256").update(requestId).digest("hex").slice(0, 24);
 }
 
+export interface RecoveredFxCompletion {
+  content: string;
+  sessionId: string;
+}
+
+export function extractCommittedFxCompletion(
+  events: string,
+  incomingMessageId: string,
+): string | undefined {
+  let completion: string | undefined;
+  for (const line of events.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as {
+        kind?: unknown;
+        payload?: {
+          turn?: {
+            user?: { text?: unknown };
+            assistant?: unknown;
+          };
+        };
+      };
+      const userText = event.payload?.turn?.user?.text;
+      const assistant = event.payload?.turn?.assistant;
+      if (
+        event.kind === "history_turn_committed" &&
+        typeof userText === "string" &&
+        userText.includes(`messageId: ${incomingMessageId}`) &&
+        typeof assistant === "string" &&
+        assistant.trim()
+      ) {
+        completion = assistant.trim();
+      }
+    } catch {
+      // Ignore partially written or unrelated event records.
+    }
+  }
+  return completion;
+}
+
+export async function recoverDetachedFxCompletion(input: {
+  sandbox: AgentSandbox;
+  incomingMessageId: string;
+}): Promise<"running" | RecoveredFxCompletion | undefined> {
+  const jobDirectory = `.console/jobs/${fxJobKey(input.incomingMessageId)}`;
+  const pidFile = `${input.sandbox.root}/${jobDirectory}/worker.pid`;
+  const state = await input.sandbox.run({
+    command: `pid="$(cat '${pidFile}' 2>/dev/null || true)"
+if test -n "$pid" && kill -0 "$pid" 2>/dev/null && test -r "/proc/$pid/cmdline" && tr '\\0' ' ' < "/proc/$pid/cmdline" | grep -Fq '/.console/bin/fx ask'; then
+  printf running
+else
+  printf stopped
+fi`,
+  });
+  if (state.stdout.trim() === "running") return "running";
+
+  const located = await input.sandbox.run({
+    command: `find '${input.sandbox.root}/.fx/sessions' -mindepth 2 -maxdepth 2 -type f -name events.jsonl -exec grep -lF -- '${input.incomingMessageId}' {} + | sort`,
+  });
+  const eventPaths = located.stdout.trim().split("\n").filter(Boolean).reverse();
+  for (const eventPath of eventPaths) {
+    if (
+      !eventPath.startsWith(`${input.sandbox.root}/.fx/sessions/`) ||
+      !eventPath.endsWith("/events.jsonl")
+    ) {
+      continue;
+    }
+    const events = await input.sandbox.readTextFile(eventPath);
+    if (!events) continue;
+    const content = extractCommittedFxCompletion(events, input.incomingMessageId);
+    if (!content) continue;
+    const sessionId = eventPath.split("/").at(-2);
+    if (!sessionId || !validSessionId(sessionId)) continue;
+    return { content, sessionId };
+  }
+}
+
 export async function launchFxTurn(input: {
   ownerId: string;
   agent: AgentProfile;

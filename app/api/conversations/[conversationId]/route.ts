@@ -6,18 +6,37 @@ import {
   listConversationActivity,
   listConversationMessages,
 } from "@/lib/server/conversation-store";
-import { dispatchNextAgentTask } from "@/lib/server/task-dispatcher";
+import {
+  dispatchNextAgentTask,
+  recoverCompletedConversationTask,
+  settleCompletedAgentTask,
+} from "@/lib/server/task-dispatcher";
+
+export const maxDuration = 300;
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ conversationId: string }> },
 ) {
   try {
     const ownerId = await requireOwner();
     const { conversationId } = await context.params;
-    const conversation = await getConversation(ownerId, conversationId);
+    let conversation = await getConversation(ownerId, conversationId);
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+    if (
+      conversation.status === "working" &&
+      new URL(request.url).searchParams.get("recover") === "1"
+    ) {
+      const recovered = await recoverCompletedConversationTask({ ownerId, conversationId });
+      if (recovered.status === "completed") {
+        const agentId = conversation.agentId;
+        after(() =>
+          settleCompletedAgentTask({ ownerId, agentId }).catch(() => undefined)
+        );
+        conversation = (await getConversation(ownerId, conversationId)) ?? conversation;
+      }
     }
     if (conversation.status === "working") {
       after(() =>

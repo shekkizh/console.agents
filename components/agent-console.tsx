@@ -435,8 +435,9 @@ function AgentChat({
   const [savedMessages, setSavedMessages] = useState<AgentMessage[]>([]);
   const [activity, setActivity] = useState<ConversationMessageActivity[]>([]);
   const [conversationTab, setConversationTab] = useState<"chat" | "activity">("chat");
-  const refreshMessages = useCallback(async () => {
-    const response = await fetch(`/api/conversations/${conversation.id}`, { cache: "no-store" });
+  const refreshMessages = useCallback(async (recover = false) => {
+    const suffix = recover ? "?recover=1" : "";
+    const response = await fetch(`/api/conversations/${conversation.id}${suffix}`, { cache: "no-store" });
     if (!response.ok) return false;
     const body = (await response.json()) as {
       conversation: ConversationProfile;
@@ -450,7 +451,7 @@ function AgentChat({
   }, [conversation.id, onConversationUpdate]);
   useEffect(() => {
     let ignore = false;
-    void fetch(`/api/conversations/${conversation.id}`, { cache: "no-store" })
+    void fetch(`/api/conversations/${conversation.id}?recover=1`, { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : undefined))
       .then((body: {
         conversation: ConversationProfile;
@@ -568,7 +569,7 @@ function AgentChat({
     setRefreshing(true);
     setLocalError(undefined);
     try {
-      const refreshed = await refreshMessages();
+      const refreshed = await refreshMessages(true);
       refreshConversations();
       refreshRoster();
       if (!refreshed) setLocalError("Unable to refresh this conversation");

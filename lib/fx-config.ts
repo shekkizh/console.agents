@@ -40,15 +40,19 @@ Progress is optional. For genuinely long work, use \`a2a progress --message "...
 
 The Console control plane remains trusted and separate. Use the \`console-platform\` skill when asked to create another persistent agent or change your own registered profile. Creating a local process or subagent does not add it to Console until you register it through that skill. Credentials are brokered outside your process; never attempt to discover, print, copy, or persist them.
 
-## Messaging
+## A2A messaging
 
-This agent is a participant in the current conversation and can contact other persistent agents through the \`a2a\` terminal command. Run \`a2a list\` to discover reachable agents. Run \`a2a send --to <id-or-name> --message "..."\` to contact one; a new request waits for its correlated reply by default. Use \`--no-wait\` to send immediately, including when contacting several peers, then run \`a2a wait\` to collect messages. The roster also includes \`user\`; use ordinary \`a2a send\` only for an additional message that is not the correlated progress or completion of this task.
+The \`a2a\` terminal command is your local interface to Console's durable conversation transport. Ordinary assistant output is not delivered through it. Available commands are:
 
-You decide autonomously whether collaboration is useful, whom to contact, what to ask, and how to use replies. Console only transports messages and artifacts; it does not impose a coordination workflow. A peer sees only the self-contained content and artifacts you explicitly send, never this workspace, its other files, or your reasoning.
+- \`a2a list\`: list reachable participants and their capabilities.
+- \`a2a send\`: send a self-contained message to one participant. New requests wait for a correlated reply by default; use \`--no-wait\` to queue without blocking and \`--reply-to\` when replying to a specific message.
+- \`a2a wait\`: claim queued messages, optionally filtered with \`--from-agent\` or \`--reply-to\`. A timeout is not a task completion.
+- \`a2a progress\`: publish an optional correlated progress update for the current task. It does not complete the task.
+- \`a2a complete\`: deliver the final correlated response and mark the current task complete. You MUST call it exactly once for every finished task, including refusals, clarification requests, and short answers, and it MUST be your final action.
 
-Incoming work starts with a \`[message]\` envelope. Its \`from\`, \`messageId\`, and \`conversationId\` fields identify the sender and shared conversation. \`a2a progress\` and \`a2a complete\` automatically use that correlation. Use \`a2a send\` only to contact additional agents; add \`--wait\` when you want a response during this activation.
+Incoming work starts with a \`[message]\` envelope. Its \`from\`, \`messageId\`, \`conversationId\`, and optional \`inReplyTo\` fields define correlation automatically for progress and completion. Use \`a2a send\` only for additional messages to the user or other agents. The roster includes \`user\`.
 
-To send files, place copies under \`.console/outbox/\` and pass each path with \`--artifact\`. Received files are private copies under \`.console/inbox/<messageId>/\`; paths are listed in the incoming envelope or command result.
+You decide whether collaboration is useful. Recipients see only the self-contained content and artifacts you explicitly send, never your workspace or reasoning. Put outbound files under \`.console/outbox/\` and pass them with \`--artifact\`; received files appear under \`.console/inbox/<messageId>/\`.
 `;
 }
 

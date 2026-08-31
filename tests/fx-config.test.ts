@@ -68,9 +68,12 @@ test("renders the sandbox boundary into fx instructions", () => {
   assert.doesNotMatch(instructions, /sk_[A-Za-z0-9]/);
   assert.match(instructions, /a2a list/);
   assert.match(instructions, /a2a send/);
+  assert.match(instructions, /a2a wait/);
+  assert.match(instructions, /A2A messaging/);
+  assert.match(instructions, /including refusals, clarification requests, and short answers/);
   assert.match(instructions, /a2a complete/);
   assert.doesNotMatch(instructions, /a2a_(?:list|send|wait)/);
-  assert.match(instructions, /decide autonomously whether collaboration is useful/i);
+  assert.match(instructions, /decide whether collaboration is useful/i);
   assert.match(instructions, /\.console\/outbox/);
 });
 
