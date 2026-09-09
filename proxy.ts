@@ -1,6 +1,7 @@
 import { clerkMiddleware } from "@clerk/nextjs/server";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { authorizedReconciler } from "@/lib/server/cron-auth";
 import { verifyAgentMessageToken } from "@/lib/server/message-auth";
 import { authorizedE2ETestRequest } from "@/lib/server/e2e-auth";
 import { config as serverConfig } from "@/lib/server/config";
@@ -14,7 +15,8 @@ function bearerToken(request: NextRequest): string | undefined {
 }
 
 function authorizedAgentMessageApi(request: NextRequest): boolean {
-  if (request.nextUrl.pathname !== "/api/a2a") return false;
+  if (request.nextUrl.pathname === "/api/internal/reconcile") return authorizedReconciler(request);
+  if (request.nextUrl.pathname !== "/api/a2a" && !request.nextUrl.pathname.startsWith("/api/model-gateway/")) return false;
   const token = bearerToken(request);
   return Boolean(token && verifyAgentMessageToken(token));
 }

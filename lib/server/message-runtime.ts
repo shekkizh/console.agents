@@ -15,6 +15,10 @@ import {
   type ConversationMessage,
 } from "@/lib/server/message-store";
 import { getAgent } from "@/lib/server/agent-store";
+import { isAgentActivationActive } from "@/lib/server/agent-activation";
+import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
+
+export const MAX_PEER_WAIT_SECONDS = 60;
 
 const sendSchema = z.object({
   to: z.string().trim().min(1),
@@ -22,13 +26,13 @@ const sendSchema = z.object({
   summary: z.string().trim().min(1).max(500).optional(),
   reply_to: z.string().trim().min(1).max(100).optional(),
   wait_for_reply: z.boolean().optional(),
-  timeout_s: z.number().finite().min(0).max(3_600).default(3_600),
+  timeout_s: z.number().finite().min(0).max(MAX_PEER_WAIT_SECONDS).default(MAX_PEER_WAIT_SECONDS),
 }).strict();
 
 const waitSchema = z.object({
   from_agent: z.string().trim().min(1).optional(),
   reply_to: z.string().trim().min(1).max(100).optional(),
-  timeout_s: z.number().finite().min(0).max(3_600).default(3_600),
+  timeout_s: z.number().finite().min(0).max(MAX_PEER_WAIT_SECONDS).default(MAX_PEER_WAIT_SECONDS),
 }).strict();
 
 const progressSchema = z.object({
@@ -52,6 +56,16 @@ export interface AgentMessageContext {
   incomingMessageId?: string;
   incomingFromAgentId?: string;
   abortSignal?: AbortSignal;
+}
+
+// Keep only the local database mutation under the sender lock. Peer dispatch
+// and long polling must remain outside it so two agents can exchange replies.
+async function withCurrentActivation<T>(context: AgentMessageContext, operation: () => Promise<T>): Promise<T> {
+  if (!context.incomingMessageId) return operation(); // Trusted internal callers.
+  return withAgentLifecycleLock(context, async () => {
+    if (!await isAgentActivationActive(context)) throw new Error("This activation is no longer active");
+    return operation();
+  });
 }
 
 function correlatedMessageId(
@@ -171,6 +185,33 @@ async function executeTaskCompletion(
   };
 }
 
+async function executeTaskFailure(context: AgentMessageContext, rawArguments: Record<string, unknown>) {
+  const args = z.object({ content: z.string().trim().min(1).max(100_000) }).strict().parse(rawArguments);
+  const request = await correlatedRequest(context);
+  const responseId = correlatedMessageId("failure", context, request.id);
+  const existing = await getConversationMessage(context.ownerId, responseId);
+  if (existing) {
+    await markMessageDelivery(context.ownerId, request.id, context.agentId, "failed", args.content);
+    return { status: "already_failed", messageId: existing.id };
+  }
+  if (!await isMessageDeliveryPending(context.ownerId, request.id, context.agentId)) {
+    throw new Error("The correlated task is no longer running");
+  }
+  const response = await publishConversationMessage({
+    ownerId: context.ownerId,
+    id: responseId,
+    conversationId: context.conversationId,
+    senderType: "agent",
+    senderId: context.agentId,
+    ...replyTarget(context, request),
+    kind: "error",
+    inReplyTo: request.id,
+    content: args.content,
+  });
+  await markMessageDelivery(context.ownerId, request.id, context.agentId, "failed", args.content);
+  return { status: "failed", messageId: response.id };
+}
+
 function safeFilename(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160) || "artifact";
 }
@@ -217,6 +258,8 @@ async function messageResult(context: AgentMessageContext, message: Conversation
       name: sender?.name ?? message.senderId,
     },
     inReplyTo: message.inReplyTo,
+    kind: message.kind,
+    activity: message.metadata.activity,
     content: message.content,
     summary: message.summary,
     artifacts: artifacts.map((artifact) => ({
@@ -257,6 +300,39 @@ export async function formatMessageEnvelope(input: {
   return lines.join("\n");
 }
 
+// A request keeps its original wait budget across repeated HTTP polls. Once the
+// budget expires agents can still collect an already queued reply, but cannot
+// keep their sequential inbox occupied indefinitely waiting for that request.
+export function remainingPeerWaitSeconds(createdAt: string, requested: number, now = Date.now()): number {
+  return Math.max(0, Math.min(requested, (Date.parse(createdAt) + MAX_PEER_WAIT_SECONDS * 1_000 - now) / 1_000));
+}
+
+async function boundedReplyWait(context: AgentMessageContext, requestId: string, requested: number) {
+  const request = await getConversationMessage(context.ownerId, requestId);
+  if (!request || request.conversationId !== context.conversationId ||
+    request.senderType !== "agent" || request.senderId !== context.agentId) {
+    throw new Error("reply_to must identify a request sent by this agent in this conversation");
+  }
+  return {
+    timeoutSeconds: remainingPeerWaitSeconds(request.createdAt, requested),
+    deadline: Date.parse(request.createdAt) + MAX_PEER_WAIT_SECONDS * 1_000,
+  };
+}
+
+async function wouldWaitOnAncestor(context: AgentMessageContext, recipientId: string): Promise<boolean> {
+  let requestId = context.incomingMessageId;
+  const visited = new Set<string>();
+  for (let depth = 0; requestId && depth < 32; depth += 1) {
+    if (visited.has(requestId)) return true;
+    visited.add(requestId);
+    const request = await getConversationMessage(context.ownerId, requestId);
+    if (!request || request.conversationId !== context.conversationId) return false;
+    if (request.senderType === "agent" && request.senderId === recipientId) return true;
+    requestId = typeof request.metadata.parentRequestId === "string" ? request.metadata.parentRequestId : undefined;
+  }
+  return Boolean(requestId); // Be conservative if the ancestry exceeds our bound.
+}
+
 async function waitForMessages(
   context: AgentMessageContext,
   filter: { fromAgentId?: string; inReplyTo?: string; timeoutSeconds: number },
@@ -266,16 +342,24 @@ async function waitForMessages(
   try {
     while (true) {
       context.abortSignal?.throwIfAborted();
-      const messages = await claimConversationMessages({
+      const messages = await withCurrentActivation(context, () => claimConversationMessages({
         ownerId: context.ownerId,
         agentId: context.agentId,
         conversationId: context.conversationId,
         fromAgentId: filter.fromAgentId,
         inReplyTo: filter.inReplyTo,
-      });
-      if (messages.length > 0) {
-        return Promise.all(messages.map((message) => messageResult(context, message)));
+      }));
+      // Consume progress so it cannot become a later coding task, but do not
+      // resolve a correlated request until its reply/error arrives. The transcript
+      // retains progress, and uncorrelated waits can still receive it.
+      const replies = filter.inReplyTo
+        ? messages.filter((message) => message.metadata.activity !== "progress")
+        : messages;
+      if (replies.length > 0) {
+        return Promise.all(replies.map((message) => messageResult(context, message)));
       }
+      // A full batch can hide a completion behind progress; drain it before waiting.
+      if (messages.length === 50) continue;
       const remaining = deadline - Date.now();
       if (remaining <= 0) return [];
       await listener.wait(remaining);
@@ -321,8 +405,10 @@ export async function executeMessageOperation(
       (!toHuman && recipient.id === context.incomingFromAgentId
         ? context.incomingMessageId
         : undefined);
-    const waitForReply = !toHuman && (args.wait_for_reply ?? !inReplyTo);
-    const message = await publishConversationMessage({
+    const requestedWait = !toHuman && (args.wait_for_reply ?? !inReplyTo);
+    const dependencyCycle = requestedWait && await wouldWaitOnAncestor(context, recipient.id);
+    const waitForReply = requestedWait && !dependencyCycle;
+    const message = await withCurrentActivation(context, () => publishConversationMessage({
       ownerId: context.ownerId,
       conversationId: context.conversationId,
       senderType: "agent",
@@ -330,10 +416,11 @@ export async function executeMessageOperation(
       recipientType: toHuman ? "human" : "agent",
       recipientId: recipient.id,
       ...(inReplyTo ? { inReplyTo } : {}),
+      metadata: context.incomingMessageId ? { parentRequestId: context.incomingMessageId } : {},
       content: args.content,
       summary: args.summary,
       artifacts,
-    });
+    }));
     if (!toHuman) {
       const { dispatchNextAgentTask } = await import("@/lib/server/task-dispatcher");
       await dispatchNextAgentTask({
@@ -347,12 +434,13 @@ export async function executeMessageOperation(
         messageId: message.id,
         conversationId: message.conversationId,
         to: toHuman ? "user" : recipient.id,
+        ...(dependencyCycle ? { waitSkipped: "dependency_cycle", advice: "The recipient is an ancestor of this task. The message is queued; finish this activation so blocked peers can continue." } : {}),
       };
     }
     const replies = await waitForMessages(context, {
       fromAgentId: recipient.id,
       inReplyTo: message.id,
-      timeoutSeconds: args.timeout_s,
+      timeoutSeconds: remainingPeerWaitSeconds(message.createdAt, args.timeout_s),
     });
     return {
       status: replies.length > 0 ? "replied" : "timeout",
@@ -360,6 +448,7 @@ export async function executeMessageOperation(
       conversationId: message.conversationId,
       to: recipient.id,
       replies,
+      ...(replies.length === 0 ? { requestPreserved: true, advice: "The request remains queued or running. After at most 60 seconds, finish this activation with useful partial results; collect the correlated reply in a later activation without sending the request again." } : {}),
     };
   }
 
@@ -368,23 +457,29 @@ export async function executeMessageOperation(
     const from = args.from_agent
       ? await resolveAgentRecipient(context.ownerId, context.agentId, args.from_agent)
       : undefined;
+    const budget = args.reply_to ? await boundedReplyWait(context, args.reply_to, args.timeout_s) : undefined;
     const messages = await waitForMessages(context, {
       fromAgentId: from?.id,
       inReplyTo: args.reply_to,
-      timeoutSeconds: args.timeout_s,
+      timeoutSeconds: budget?.timeoutSeconds ?? args.timeout_s,
     });
     return {
       status: messages.length > 0 ? "received" : "timeout",
       messages,
+      ...(messages.length === 0 && budget && Date.now() >= budget.deadline ? { waitExhausted: true } : {}),
     };
   }
 
   if (operation === "progress") {
-    return executeTaskProgress(context, rawArguments, artifacts);
+    return withCurrentActivation(context, () => executeTaskProgress(context, rawArguments, artifacts));
   }
 
   if (operation === "complete") {
     return executeTaskCompletion(context, rawArguments, artifacts);
+  }
+
+  if (operation === "fail") {
+    return executeTaskFailure(context, rawArguments);
   }
 
   throw new Error(`Unknown message operation: ${operation}`);

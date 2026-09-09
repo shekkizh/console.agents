@@ -16,7 +16,7 @@ const agent: AgentProfile = {
   specialty: "Builds software",
   instructions: "Work carefully and verify the result.",
   fxConfig: {
-    model: "minimax/minimax-m3-free",
+    model: "zai/glm-5.3-flash",
     networkAccess: "full",
     networkAllowlist: [],
     skills: [],
@@ -31,7 +31,7 @@ const agent: AgentProfile = {
 
 test("serializes agent workspace configuration", () => {
   assert.deepEqual(JSON.parse(fxProjectConfig(agent)), {
-    model: "minimax/minimax-m3-free",
+    model: "zai/glm-5.3-flash",
     sandbox: "none",
   });
 });
@@ -60,8 +60,8 @@ test("renders the sandbox boundary into fx instructions", () => {
   assert.match(instructions, /full control of this sandbox/);
   assert.match(instructions, /never claim access outside it/i);
   assert.match(instructions, /Prefer flexible model judgment and reusable skills/);
-  assert.match(instructions, /a2a complete --message-file/);
-  assert.match(instructions, /only terminal delivery mechanism/);
+  assert.match(instructions, /launcher waits for the top-level FX process to exit/);
+  assert.match(instructions, /Native FX subagents must return findings to their parent/);
   assert.match(instructions, /a2a progress/);
   assert.match(instructions, /For office documents, also provide a PDF preview/);
   assert.match(instructions, /console-platform/);
@@ -70,7 +70,7 @@ test("renders the sandbox boundary into fx instructions", () => {
   assert.match(instructions, /a2a send/);
   assert.match(instructions, /a2a wait/);
   assert.match(instructions, /A2A messaging/);
-  assert.match(instructions, /including refusals, clarification requests, and short answers/);
+  assert.match(instructions, /\.console\/artifacts.json/);
   assert.match(instructions, /a2a complete/);
   assert.doesNotMatch(instructions, /a2a_(?:list|send|wait)/);
   assert.match(instructions, /decide whether collaboration is useful/i);
@@ -78,14 +78,14 @@ test("renders the sandbox boundary into fx instructions", () => {
 });
 
 test("rejects unpinned fx versions", () => {
-  assert.equal(validateFxVersion("v0.0.4"), "v0.0.4");
+  assert.equal(validateFxVersion("v0.0.8"), "v0.0.8");
   assert.throws(() => validateFxVersion("latest"), /stable tag/);
-  assert.throws(() => validateFxVersion("v0.0.4; curl bad"), /stable tag/);
+  assert.throws(() => validateFxVersion("v0.0.8; curl bad"), /stable tag/);
 });
 
 test("resolves pinned versions to the official release", () => {
   assert.equal(
-    fxReleaseBase("v0.0.4"),
-    "https://github.com/vercel-labs/fx/releases/download/v0.0.4",
+    fxReleaseBase("v0.0.8"),
+    "https://github.com/vercel-labs/fx/releases/download/v0.0.8",
   );
 });

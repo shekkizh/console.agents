@@ -1,12 +1,12 @@
+import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import type { NetworkPolicy as VercelNetworkPolicy } from "@vercel/sandbox";
-import { config, consoleAgentApiHost } from "@/lib/server/config";
+import { consoleAgentApiHost } from "@/lib/server/config";
 import { FX_SANDBOX_TIMEOUT_MS } from "@/lib/fx-runtime-constants";
 import type { AgentProfile, FxNetworkAccess } from "@/lib/types";
 
 const AI_GATEWAY_HOST = "ai-gateway.vercel.sh";
-const INSTALL_HOSTS = ["github.com", "*.githubusercontent.com"];
 const SANDBOX_IMAGE = process.env.MICROSANDBOX_IMAGE ?? "python:3.13-bookworm";
 const VERCEL_ACQUIRE_TIMEOUT_MS = 60_000;
 const VERCEL_COMMAND_TIMEOUT_MS = 120_000;
@@ -51,9 +51,8 @@ function stableSandboxName(ownerId: string, agentId: string): string {
 function runtimeKey(agent: AgentProfile): string {
   return createHash("sha256")
     .update(JSON.stringify({
-      adapterVersion: 2,
+      adapterVersion: 3,
       image: SANDBOX_IMAGE,
-      fxVersion: config.fxVersion,
       networkAccess: agent.fxConfig.networkAccess,
       networkAllowlist: agent.fxConfig.networkAllowlist,
     }))
@@ -66,7 +65,6 @@ function allowedDomains(access: FxNetworkAccess, allowlist: string[]): string[] 
   return [
     AI_GATEWAY_HOST,
     consoleAgentApiHost(),
-    ...INSTALL_HOSTS,
     ...(access === "allowlist" ? allowlist : []),
   ];
 }
@@ -208,7 +206,7 @@ async function acquireVercelSandbox(
         resolvedPath(root, path),
       ];
       const result = await sandbox.runCommand("rm", flags);
-      if (result.exitCode !== 0 && !options?.force) {
+      if (result.exitCode !== 0) {
         throw new Error((await result.stderr()).trim() || "Unable to remove " + path);
       }
     },
@@ -231,19 +229,31 @@ async function acquireMicrosandbox(
     Rule,
     Sandbox,
     SandboxNotFoundError,
+    Snapshot,
   } = await import("microsandbox");
   const name = stableSandboxName(ownerId, agent.id);
   const key = runtimeKey(agent);
   let local: import("microsandbox").Sandbox | undefined;
+  let preservedSnapshot: string | undefined;
 
   try {
     const handle = await Sandbox.get(name);
     const existing = handle.config() as { labels?: Record<string, string> };
     if (existing.labels?.["console.runtime"] !== key) {
-      if (handle.status === "running" || handle.status === "draining") {
-        await handle.stop();
+      if (handle.status === "running") {
+        const connected = await handle.connect();
+        const live = await connected.shell("python3 - <<'PY'\nimport pathlib\nprint(any(b'/.console/jobs/' in p.read_bytes() and b'/runner.py' in p.read_bytes() or b'/.console/bin/fx\\x00ask' in p.read_bytes() for p in pathlib.Path('/proc').glob('[0-9]*/cmdline') if p.exists()))\nPY");
+        if (live.code !== 0) throw new Error("Unable to inspect sandbox before configuration update");
+        if (live.stdout().trim() === "True") local = connected;
       }
-      await handle.remove();
+      if (!local) {
+        if (handle.status === "running" || handle.status === "draining") await handle.stop();
+        // Keep a durable snapshot before replacing an immutable local VM policy.
+        // FX version changes are deliberately excluded from this configuration key.
+        preservedSnapshot = `${name}-config-${Date.now()}`;
+        await handle.snapshot(preservedSnapshot);
+        await handle.remove();
+      }
     } else {
       local = handle.status === "running"
         ? await handle.connect()
@@ -251,6 +261,10 @@ async function acquireMicrosandbox(
     }
   } catch (error) {
     if (!(error instanceof SandboxNotFoundError)) throw error;
+    // Resume an interrupted policy migration from its newest preserved workspace.
+    const backups = (await Snapshot.list()).filter((item) => item.name?.startsWith(`${name}-config-`));
+    backups.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+    preservedSnapshot = backups[0]?.path;
   }
 
   if (!local) {
@@ -271,8 +285,10 @@ async function acquireMicrosandbox(
             ),
           ],
         };
-    local = await Sandbox.builder(name)
-      .image(SANDBOX_IMAGE)
+    const builder = Sandbox.builder(name);
+    if (preservedSnapshot) builder.fromSnapshot(preservedSnapshot);
+    else builder.image(SANDBOX_IMAGE);
+    local = await builder
       .pullPolicy("if-missing")
       .cpus(1)
       .memory(2048)
@@ -316,11 +332,9 @@ async function acquireMicrosandbox(
       return { id: String(started.pid), pid: started.pid };
     },
     async readTextFile(path) {
-      try {
-        return await local.fs().readToString(resolvedPath(root, path));
-      } catch {
-        return null;
-      }
+      const target = resolvedPath(root, path);
+      if (!await local.fs().exists(target)) return null;
+      return local.fs().readToString(target);
     },
     async writeTextFile(path, content) {
       const target = resolvedPath(root, path);
@@ -342,13 +356,13 @@ async function acquireMicrosandbox(
         resolvedPath(root, path),
       ];
       const result = await local.exec("rm", flags);
-      if (result.code !== 0 && !options?.force) {
+      if (result.code !== 0) {
         throw new Error(result.stderr() || "Unable to remove " + path);
       }
     },
     async setNetworkPolicy() {
-      // Local VM policies are immutable. The runtime key recreates the VM
-      // whenever this agent's network configuration changes.
+      // Local policies are immutable; acquisition snapshots and restores the
+      // workspace when policy changes, before any new worker starts.
     },
     async stop() {
       await local.stop();
@@ -376,11 +390,41 @@ export async function cancelSandboxTask(input: {
   agent: AgentProfile;
   messageId: string;
 }): Promise<void> {
-  const sandbox = await acquireAgentSandbox(input);
-  const jobKey = createHash("sha256").update(input.messageId).digest("hex").slice(0, 24);
-  const pidFile = sandbox.root + "/.console/jobs/" + jobKey + "/worker.pid";
-  await sandbox.run({
-    command: "if test -s '" + pidFile + "'; then kill -TERM \"$(cat '" +
-      pidFile + "')\" 2>/dev/null || true; fi",
+  return withAgentLifecycleLock({ ownerId: input.ownerId, agentId: input.agent.id }, async () => {
+    const sandbox = await acquireAgentSandbox(input);
+    const jobKey = createHash("sha256").update(input.messageId).digest("hex").slice(0, 24);
+    const result = await sandbox.run({ command: `python3 - <<'PYCANCEL'
+import os, pathlib, signal, time
+root = ${JSON.stringify(sandbox.root)}
+job = pathlib.Path(root) / '.console/jobs' / '${jobKey}'
+message = ${JSON.stringify(input.messageId)}
+def verified(pid, role):
+    try:
+        args = pathlib.Path('/proc/' + str(pid) + '/cmdline').read_bytes().split(b'\\0')
+        if role == 'worker':
+            return str(job / 'runner.py').encode() in args
+        return args[0] == (root + '/.console/bin/fx').encode() and b'ask' in args and any(('messageId: ' + message).encode() in arg for arg in args)
+    except (OSError, IndexError):
+        return False
+processes = []
+for role in ['worker', 'fx']:
+    try:
+        pid = int((job / (role + '.pid')).read_text().strip())
+        if pid > 1 and verified(pid, role):
+            processes.append((pid, role))
+    except (OSError, ValueError):
+        pass
+for sig in [signal.SIGTERM, signal.SIGKILL]:
+    for pid, role in processes:
+        if verified(pid, role):
+            try:
+                if role == 'fx' and os.getpgid(pid) == pid: os.killpg(pid, sig)
+                else: os.kill(pid, sig)
+            except ProcessLookupError: pass
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and any(verified(pid, role) for pid, role in processes): time.sleep(.05)
+if any(verified(pid, role) for pid, role in processes): raise RuntimeError('FX worker did not stop')
+PYCANCEL` });
+    if (result.exitCode !== 0) throw new Error("Unable to stop the correlated FX worker");
   });
 }

@@ -1,6 +1,5 @@
 import { Client, neon } from "@neondatabase/serverless";
 import type { CapturedArtifact } from "@/lib/server/artifact-capture";
-import { FX_CLAIM_STALE_MS, FX_STALE_DELIVERY_MS } from "@/lib/fx-runtime-constants";
 import { requireDatabaseListenerUrl, requireDatabaseUrl } from "@/lib/server/config";
 import { getAgent, listAgents } from "@/lib/server/agent-store";
 import type {
@@ -431,25 +430,6 @@ export async function nextPendingAgentMessage(input: {
   agentId: string;
 }): Promise<PendingAgentMessage | undefined> {
   const sql = database();
-  await sql.query(
-    `UPDATE message_deliveries delivery
-     SET state = 'queued',
-         claimed_at = NULL,
-         running_at = NULL,
-         error = 'Recovered after sandbox lease expired'
-     FROM conversation_messages message
-     WHERE delivery.owner_id = $1
-       AND message.owner_id = delivery.owner_id
-       AND message.id = delivery.message_id
-       AND delivery.recipient_type = 'agent'
-       AND delivery.recipient_id = $2
-       AND (
-         (delivery.state = 'claimed' AND delivery.claimed_at <= now() - ($3::double precision * interval '1 millisecond'))
-         OR
-         (delivery.state = 'running' AND delivery.running_at <= now() - ($4::double precision * interval '1 millisecond'))
-       )`,
-    [input.ownerId, input.agentId, FX_CLAIM_STALE_MS, FX_STALE_DELIVERY_MS],
-  );
   const rows = await sql.query(
     `WITH guard AS (
        SELECT pg_try_advisory_xact_lock(hashtext($1), hashtext($2)) AS acquired
@@ -477,7 +457,7 @@ export async function nextPendingAgentMessage(input: {
        FOR UPDATE OF delivery SKIP LOCKED
      ), claimed AS (
        UPDATE message_deliveries delivery
-       SET state = 'claimed', claimed_at = COALESCE(claimed_at, now())
+       SET state = 'claimed', claimed_at = COALESCE(claimed_at, now()), activation_started_at = now()
        FROM selected
        WHERE delivery.id = selected.id
        RETURNING delivery.message_id, delivery.state
@@ -524,7 +504,7 @@ export async function getActiveConversationDelivery(
   const rows = await database().query(
     `SELECT message.id AS message_id,
             delivery.recipient_id AS agent_id,
-            delivery.running_at
+            COALESCE(delivery.running_at, delivery.claimed_at, delivery.created_at) AS running_at
      FROM conversation_messages message
      JOIN message_deliveries delivery
        ON delivery.owner_id = message.owner_id
@@ -532,8 +512,7 @@ export async function getActiveConversationDelivery(
      WHERE message.owner_id = $1
        AND message.conversation_id = $2
        AND delivery.recipient_type = 'agent'
-       AND delivery.state = 'running'
-       AND delivery.running_at IS NOT NULL
+       AND delivery.state IN ('claimed', 'running')
      ORDER BY delivery.running_at DESC, delivery.id DESC
      LIMIT 1`,
     [ownerId, conversationId],
@@ -794,4 +773,42 @@ export async function listConversationActivity(
       createdAt: new Date(row.created_at as string | Date).toISOString(),
     };
   });
+}
+
+export interface AgentDelivery {
+  messageId: string;
+  agentId: string;
+  conversationId: string;
+  runningAt: string;
+}
+
+async function findAgentDelivery(ownerId: string, agentId: string, terminal: boolean): Promise<AgentDelivery | undefined> {
+  const rows = await database().query(
+    `SELECT message.id AS message_id, message.conversation_id, delivery.recipient_id AS agent_id,
+            COALESCE(delivery.running_at, delivery.claimed_at, delivery.created_at) AS running_at
+     FROM message_deliveries delivery
+     JOIN conversation_messages message ON message.owner_id = delivery.owner_id AND message.id = delivery.message_id
+     WHERE delivery.owner_id = $1 AND delivery.recipient_type = 'agent' AND delivery.recipient_id = $2
+       AND (($3::boolean AND delivery.state IN ('completed', 'failed') AND delivery.activation_started_at IS NOT NULL AND delivery.settled_at IS NULL)
+         OR (NOT $3::boolean AND delivery.state IN ('claimed', 'running')))
+     ORDER BY delivery.created_at ASC LIMIT 1`, [ownerId, agentId, terminal],
+  );
+  const row = rows[0] as { message_id: string; conversation_id: string; agent_id: string; running_at: string | Date } | undefined;
+  return row ? { messageId: row.message_id, agentId: row.agent_id, conversationId: row.conversation_id, runningAt: new Date(row.running_at).toISOString() } : undefined;
+}
+
+export function getActiveAgentDelivery(ownerId: string, agentId: string) {
+  return findAgentDelivery(ownerId, agentId, false);
+}
+
+export function getUnsettledAgentDelivery(ownerId: string, agentId: string) {
+  return findAgentDelivery(ownerId, agentId, true);
+}
+
+export async function markAgentDeliverySettled(ownerId: string, agentId: string, messageId: string) {
+  await database().query(
+    `UPDATE message_deliveries SET settled_at = now()
+     WHERE owner_id = $1 AND recipient_type = 'agent' AND recipient_id = $2 AND message_id = $3
+       AND state IN ('completed', 'failed')`, [ownerId, agentId, messageId],
+  );
 }

@@ -7,6 +7,7 @@ export interface AgentMessageClaims {
   conversationId: string;
   incomingMessageId?: string;
   incomingFromAgentId?: string;
+  lifecycle?: boolean;
   expiresAt: number;
 }
 
@@ -67,6 +68,7 @@ export function verifyAgentMessageToken(
       (typeof claims.incomingMessageId !== "string" || !claims.incomingMessageId)) ||
     (claims.incomingFromAgentId !== undefined &&
       (typeof claims.incomingFromAgentId !== "string" || !claims.incomingFromAgentId)) ||
+    (claims.lifecycle !== undefined && typeof claims.lifecycle !== "boolean") ||
     !Number.isFinite(claims.expiresAt) || claims.expiresAt <= now
   ) return;
   return {
@@ -75,6 +77,7 @@ export function verifyAgentMessageToken(
     conversationId: claims.conversationId,
     incomingMessageId: claims.incomingMessageId,
     incomingFromAgentId: claims.incomingFromAgentId,
+    ...(claims.lifecycle === undefined ? {} : { lifecycle: claims.lifecycle }),
     expiresAt: claims.expiresAt,
   };
 }

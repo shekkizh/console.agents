@@ -6,10 +6,9 @@ export function a2aCliSource(): string {
 import argparse
 import base64
 import json
+import math
 import os
 import pathlib
-import re
-import subprocess
 import sys
 import time
 import urllib.error
@@ -19,9 +18,10 @@ API_URL = os.environ.get("CONSOLE_A2A_URL", "")
 API_TOKEN = os.environ.get("CONSOLE_A2A_TOKEN", "")
 WORKSPACE = pathlib.Path(os.environ.get("CONSOLE_WORKSPACE", "/workspace"))
 MAX_POLL_SECONDS = 20
+MAX_WAIT_SECONDS = 60
 
 
-def call_api(operation, arguments):
+def call_api(operation, arguments, deadline=None):
     if not API_URL or not API_TOKEN:
         raise RuntimeError("Console messaging is not available in this activation")
     body = json.dumps({"operation": operation, "arguments": arguments}).encode("utf-8")
@@ -34,7 +34,9 @@ def call_api(operation, arguments):
         },
         method="POST",
     )
-    timeout = min(60, max(30, int(arguments.get("timeout_s", 0)) + 30))
+    timeout = min(60, max(30, float(arguments.get("timeout_s", 0)) + 5))
+    if deadline is not None:
+        timeout = max(0.1, min(timeout, deadline - time.monotonic()))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -95,7 +97,7 @@ def content_from(args):
 
 def continue_waiting_for_send(result, recipient, timeout_seconds, started_at):
     replies = result.get("replies", []) if isinstance(result, dict) else []
-    deadline = started_at + timeout_seconds
+    deadline = started_at + min(timeout_seconds, MAX_WAIT_SECONDS)
     while not replies:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -104,31 +106,23 @@ def continue_waiting_for_send(result, recipient, timeout_seconds, started_at):
             "from_agent": recipient,
             "reply_to": result["messageId"],
             "timeout_s": min(MAX_POLL_SECONDS, remaining),
-        })
+        }, deadline=deadline)
         replies = polled.get("messages", []) if isinstance(polled, dict) else []
+        if isinstance(polled, dict) and polled.get("waitExhausted"):
+            break
     result["status"] = "replied" if replies else "timeout"
     result["replies"] = replies
+    if not replies:
+        result["requestPreserved"] = True
+        result["advice"] = "The request remains queued or running. Finish this activation so peers can continue; collect a later reply using a2a wait --reply-to " + result["messageId"] + " --timeout 0. Do not resend the request."
     return result
 
 
-def current_fx_session_id():
-    try:
-        completed = subprocess.run(
-            [str(WORKSPACE / ".console/bin/fx"), "sessions", "--json", "--limit", "1"],
-            cwd=WORKSPACE,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=5,
-        )
-        value = json.loads(completed.stdout)
-        sessions = value.get("sessions", []) if isinstance(value, dict) else []
-        session_id = sessions[0].get("id") if sessions and isinstance(sessions[0], dict) else None
-        if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", session_id):
-            return session_id
-    except Exception:
-        pass
-    return None
+def wait_seconds(value):
+    seconds = float(value)
+    if not math.isfinite(seconds) or not 0 <= seconds <= MAX_WAIT_SECONDS:
+        raise argparse.ArgumentTypeError("timeout must be between 0 and 60 seconds")
+    return seconds
 
 
 def add_content_arguments(command):
@@ -154,19 +148,17 @@ def main():
     reply_mode.add_argument("--wait", dest="wait_for_reply", action="store_true")
     reply_mode.add_argument("--no-wait", dest="wait_for_reply", action="store_false")
     send.set_defaults(wait_for_reply=None)
-    send.add_argument("--timeout", type=float, default=3600)
+    send.add_argument("--timeout", type=wait_seconds, default=MAX_WAIT_SECONDS)
 
     wait = commands.add_parser("wait", help="wait for queued agent messages")
     wait.add_argument("--from-agent")
     wait.add_argument("--reply-to")
-    wait.add_argument("--timeout", type=float, default=3600)
+    wait.add_argument("--timeout", type=wait_seconds, default=MAX_WAIT_SECONDS)
 
     progress = commands.add_parser("progress", help="publish a correlated task update")
     add_content_arguments(progress)
     progress.add_argument("--idempotency-key")
 
-    complete = commands.add_parser("complete", help="complete the correlated task")
-    add_content_arguments(complete)
 
     args = parser.parse_args()
     if args.command == "list":
@@ -186,8 +178,10 @@ def main():
         if args.wait_for_reply is not None:
             arguments["wait_for_reply"] = args.wait_for_reply
         result = call_api("send", arguments)
-        should_continue = result.get("status") == "timeout" or (
-            args.wait_for_reply is True and result.get("status") == "queued"
+        should_continue = not result.get("waitSkipped") and (
+            result.get("status") == "timeout" or (
+                args.wait_for_reply is True and result.get("status") == "queued"
+            )
         )
         if should_continue:
             result = continue_waiting_for_send(
@@ -211,10 +205,6 @@ def main():
             arguments["summary"] = args.summary
         if args.command == "progress" and args.idempotency_key is not None:
             arguments["idempotency_key"] = args.idempotency_key
-        if args.command == "complete":
-            session_id = current_fx_session_id()
-            if session_id is not None:
-                arguments["session_id"] = session_id
         result = call_api(args.command, arguments)
     print(json.dumps(materialize_artifacts(result), ensure_ascii=False, indent=2))
 

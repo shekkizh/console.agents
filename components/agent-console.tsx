@@ -481,8 +481,13 @@ function AgentChat({
 
   useEffect(() => {
     if (!working) return;
+    let ticks = 0;
+    let inFlight = false;
     const timer = window.setInterval(() => {
-      void refreshMessages();
+      if (inFlight) return;
+      inFlight = true;
+      // Probe the worker every 30 seconds as well as on explicit refresh.
+      void refreshMessages(++ticks % 20 === 0).finally(() => { inFlight = false; });
       refreshConversations();
       refreshRoster();
     }, 1_500);
@@ -788,10 +793,12 @@ function AgentChat({
 }
 
 function AgentDialog({
+  defaultModel,
   agent,
   close,
   saved,
 }: {
+  defaultModel: string;
   agent?: AgentProfile;
   close: () => void;
   saved: () => void;
@@ -799,7 +806,7 @@ function AgentDialog({
   const [name, setName] = useState(agent?.name ?? "");
   const [specialty, setSpecialty] = useState(agent?.specialty ?? "");
   const [instructions, setInstructions] = useState(agent?.instructions ?? "");
-  const [model, setModel] = useState(agent?.fxConfig.model ?? "minimax/minimax-m3-free");
+  const [model, setModel] = useState(agent?.fxConfig.model ?? defaultModel);
   const [networkAccess, setNetworkAccess] = useState<FxNetworkAccess>(agent?.fxConfig.networkAccess ?? "full");
   const [networkAllowlist, setNetworkAllowlist] = useState(
     (agent?.fxConfig.networkAllowlist ?? []).join("\n"),
@@ -1003,9 +1010,11 @@ function ConfirmDeleteDialog({
 }
 
 function AgentConsoleContent({
+  defaultModel,
   initialAgents,
   initialConversations,
 }: {
+  defaultModel: string;
   initialAgents: AgentProfile[];
   initialConversations: ConversationProfile[];
 }) {
@@ -1285,6 +1294,7 @@ function AgentConsoleContent({
       </div>
       {dialog ? (
         <AgentDialog
+          defaultModel={defaultModel}
           agent={dialog === "edit" ? agents.find((agent) => agent.id === editingAgentId) ?? selected : undefined}
           close={() => setDialog(null)}
           saved={refreshRoster}
@@ -1304,6 +1314,7 @@ function AgentConsoleContent({
 }
 
 export function AgentConsole(props: {
+  defaultModel: string;
   initialAgents: AgentProfile[];
   initialConversations: ConversationProfile[];
 }) {

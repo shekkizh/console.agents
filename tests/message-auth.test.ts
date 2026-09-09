@@ -34,3 +34,10 @@ test("rejects modified and malformed callback tokens", () => {
   assert.equal(verifyAgentMessageToken(`${token}.extra`, now + 1), undefined);
   assert.equal(verifyAgentMessageToken("invalid", now + 1), undefined);
 });
+
+test("preserves the signed distinction between launcher and agent capabilities", () => {
+  for (const lifecycle of [true, false]) {
+    const token = createAgentMessageToken({ ...claims, lifecycle });
+    assert.equal(verifyAgentMessageToken(token)?.lifecycle, lifecycle);
+  }
+});

@@ -1,4 +1,5 @@
 import { after, NextResponse } from "next/server";
+import { stopConversationWorkers } from "@/lib/server/lifecycle-actions";
 import { requireOwner } from "@/lib/server/auth";
 import {
   deleteConversation,
@@ -30,10 +31,10 @@ export async function GET(
       new URL(request.url).searchParams.get("recover") === "1"
     ) {
       const recovered = await recoverCompletedConversationTask({ ownerId, conversationId });
-      if (recovered.status === "completed") {
-        const agentId = conversation.agentId;
+      if (recovered.status === "completed" || recovered.status === "failed") {
+        const agentId = recovered.agentId;
         after(() =>
-          settleCompletedAgentTask({ ownerId, agentId }).catch(() => undefined)
+          settleCompletedAgentTask({ ownerId, agentId }).catch((error) => console.error("agent-task.recovery.settlement.failed", { agentId, error }))
         );
         conversation = (await getConversation(ownerId, conversationId)) ?? conversation;
       }
@@ -43,7 +44,7 @@ export async function GET(
         dispatchNextAgentTask({
           ownerId,
           agentId: conversation.agentId,
-        }).catch(() => undefined)
+        }).catch((error) => console.error("agent-task.dispatch.failed", { error }))
       );
     }
     return NextResponse.json({
@@ -64,7 +65,7 @@ export async function DELETE(
   try {
     const ownerId = await requireOwner();
     const { conversationId } = await context.params;
-    await deleteConversation(ownerId, conversationId);
+    await stopConversationWorkers(ownerId, conversationId, () => deleteConversation(ownerId, conversationId));
     return new Response(null, { status: 204 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to delete conversation";

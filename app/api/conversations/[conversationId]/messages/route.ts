@@ -38,7 +38,7 @@ export async function POST(
       dispatchNextAgentTask({
         ownerId,
         agentId: conversation.agentId,
-      }).catch(() => undefined)
+      }).catch((error) => console.error("agent-task.dispatch.failed", { error }))
     );
     return NextResponse.json({ message }, { status: 202 });
   } catch (error) {

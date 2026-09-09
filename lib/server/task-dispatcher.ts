@@ -1,3 +1,4 @@
+import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
 import { createHash } from "node:crypto";
 import { acquireAgentSandbox } from "@/lib/server/agent-sandbox";
 import { getAgent, listAgents } from "@/lib/server/agent-store";
@@ -5,12 +6,16 @@ import { config } from "@/lib/server/config";
 import { runE2EFakeFxTurn } from "@/lib/server/e2e-fx";
 import {
   finalizeDetachedFxTurn,
+  hasLiveFxWorker,
   launchFxTurn,
   recoverDetachedFxCompletion,
 } from "@/lib/server/fx-runtime";
 import { executeMessageOperation, formatMessageEnvelope } from "@/lib/server/message-runtime";
 import {
   getActiveConversationDelivery,
+  getActiveAgentDelivery,
+  getUnsettledAgentDelivery,
+  markAgentDeliverySettled,
   hasActiveAgentDelivery,
   isMessageDeliveryPending,
   markMessageDelivery,
@@ -38,12 +43,34 @@ function correlatedErrorId(ownerId: string, agentId: string, requestId: string):
   );
 }
 
-export async function dispatchNextAgentTask(input: {
+async function dispatchNextAgentTaskLocked(input: {
   ownerId: string;
   agentId: string;
 }): Promise<DispatchOutcome> {
-  const agent = await getAgent(input.ownerId, input.agentId);
+  let agent = await getAgent(input.ownerId, input.agentId);
   if (!agent?.enabled) return { status: "idle" };
+  const active = await getActiveAgentDelivery(input.ownerId, input.agentId);
+  if (active) {
+    if (config.e2eFakeFx || Date.now() - new Date(active.runningAt).getTime() < 30_000) return { status: "active" };
+    await recoverCompletedConversationTaskLocked({ ownerId: input.ownerId, agentId: input.agentId, conversationId: active.conversationId });
+    if (await hasActiveAgentDelivery(input.ownerId, input.agentId)) return { status: "active" };
+  }
+  let unsettled = await getUnsettledAgentDelivery(input.ownerId, input.agentId);
+  while (unsettled) {
+    if (!config.e2eFakeFx) {
+      const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+      if (await hasLiveFxWorker(sandbox)) return { status: "active" };
+      await finalizeDetachedFxTurn({ ownerId: input.ownerId, agent, sandbox });
+    }
+    await markAgentDeliverySettled(input.ownerId, input.agentId, unsettled.messageId);
+    unsettled = await getUnsettledAgentDelivery(input.ownerId, input.agentId);
+  }
+  agent = await getAgent(input.ownerId, input.agentId);
+  if (!agent?.enabled) return { status: "idle" };
+  if (!config.e2eFakeFx) {
+    const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+    if (await hasLiveFxWorker(sandbox)) return { status: "active" };
+  }
   const request = await nextPendingAgentMessage({
     ownerId: input.ownerId,
     agentId: input.agentId,
@@ -151,36 +178,34 @@ export async function dispatchNextAgentTask(input: {
   }
 }
 
-export async function settleCompletedAgentTask(input: {
-  ownerId: string;
-  agentId: string;
-}): Promise<DispatchOutcome> {
-  const agent = await getAgent(input.ownerId, input.agentId);
-  if (!agent?.enabled) return { status: "idle" };
-
-  if (!config.e2eFakeFx) {
-    const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
-    await finalizeDetachedFxTurn({ ownerId: input.ownerId, agent, sandbox });
-  }
-
-  const next = await dispatchNextAgentTask(input);
-  if (!config.e2eFakeFx && next.status === "idle") {
-    const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
-    await sandbox.stop().catch(() => undefined);
-    return { status: "idle" };
-  }
-  if (config.e2eFakeFx && next.status === "completed") {
-    return settleCompletedAgentTask(input);
-  }
-  return next;
+export function dispatchNextAgentTask(input: { ownerId: string; agentId: string }): Promise<DispatchOutcome> {
+  return withAgentLifecycleLock(input, () => dispatchNextAgentTaskLocked(input));
 }
 
-export async function recoverCompletedConversationTask(input: {
+export function settleCompletedAgentTask(input: { ownerId: string; agentId: string }): Promise<DispatchOutcome> {
+  return withAgentLifecycleLock(input, async () => {
+    const next = await dispatchNextAgentTaskLocked(input);
+    if (!config.e2eFakeFx && next.status === "idle") {
+      const agent = await getAgent(input.ownerId, input.agentId);
+      if (agent) {
+        const sandbox = await acquireAgentSandbox({ ownerId: input.ownerId, agent });
+        if (!await hasLiveFxWorker(sandbox)) await sandbox.stop();
+      }
+    }
+    return next;
+  });
+}
+
+async function recoverCompletedConversationTaskLocked(input: {
   ownerId: string;
   conversationId: string;
-}): Promise<DispatchOutcome> {
-  const delivery = await getActiveConversationDelivery(input.ownerId, input.conversationId);
-  if (!delivery) return { status: "idle" };
+  agentId: string;
+}): Promise<Exclude<DispatchOutcome, { status: "completed" | "failed" }> | { status: "completed" | "failed"; messageId: string; agentId: string }> {
+  if (config.e2eFakeFx) return { status: "active" };
+  const delivery = await getActiveAgentDelivery(input.ownerId, input.agentId);
+  if (!delivery || delivery.conversationId !== input.conversationId) return { status: "idle" };
+  // Give a newly detached launcher time to publish its PID before probing it.
+  if (Date.now() - new Date(delivery.runningAt).getTime() < 30_000) return { status: "active" };
   const agent = await getAgent(input.ownerId, delivery.agentId);
   if (!agent?.enabled) return { status: "idle" };
 
@@ -189,8 +214,17 @@ export async function recoverCompletedConversationTask(input: {
     sandbox,
     incomingMessageId: delivery.messageId,
   });
-  if (!recovered || recovered === "running") {
+  if (recovered === "running") {
     return { status: "started", messageId: delivery.messageId, sandboxId: sandbox.id };
+  }
+
+  if (!recovered || "failed" in recovered) {
+    await executeMessageOperation(
+      { ownerId: input.ownerId, agentId: delivery.agentId, conversationId: input.conversationId, incomingMessageId: delivery.messageId },
+      "fail",
+      { content: recovered?.content ?? "The FX worker stopped without a final response. Your request is preserved; inspect the sandbox job logs and retry." },
+    );
+    return { status: "failed", messageId: delivery.messageId, agentId: delivery.agentId };
   }
 
   await executeMessageOperation(
@@ -202,6 +236,7 @@ export async function recoverCompletedConversationTask(input: {
     },
     "complete",
     { content: recovered.content, session_id: recovered.sessionId },
+    recovered.artifacts,
   );
   console.info("agent-task.recovery.completed", {
     messageId: delivery.messageId,
@@ -209,14 +244,25 @@ export async function recoverCompletedConversationTask(input: {
     conversationId: input.conversationId,
     sessionId: recovered.sessionId,
   });
-  return { status: "completed", messageId: delivery.messageId };
+  return { status: "completed", messageId: delivery.messageId, agentId: delivery.agentId };
 }
 
 export async function dispatchAllQueuedAgentTasks(ownerId: string): Promise<void> {
   const agents = await listAgents(ownerId);
-  await Promise.allSettled(
-    agents.filter((agent) => agent.enabled).map((agent) =>
-      dispatchNextAgentTask({ ownerId, agentId: agent.id })
-    ),
-  );
+  const enabled = agents.filter((agent) => agent.enabled);
+  const outcomes = await Promise.allSettled(enabled.map((agent) =>
+    dispatchNextAgentTask({ ownerId, agentId: agent.id })
+  ));
+  outcomes.forEach((outcome, index) => {
+    if (outcome.status === "rejected") console.error("agent-task.dispatch.failed", {
+      agentId: enabled[index].id,
+      error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
+    });
+  });
+}
+
+export async function recoverCompletedConversationTask(input: { ownerId: string; conversationId: string }) {
+  const delivery = await getActiveConversationDelivery(input.ownerId, input.conversationId);
+  if (!delivery) return { status: "idle" as const };
+  return withAgentLifecycleLock({ ownerId: input.ownerId, agentId: delivery.agentId }, () => recoverCompletedConversationTaskLocked({ ...input, agentId: delivery.agentId }));
 }
