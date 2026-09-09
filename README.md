@@ -10,6 +10,10 @@ A database lifecycle lock serializes launch, recovery, cleanup, and stop operati
 
 The sandbox launcher runs `fx ask --json`, waits for the top-level process, and delivers FX's `final_output` and actual parent session ID. Messaging tokens cannot complete or fail tasks. The launcher saves the callback payload before sending it and retries three times. Scheduled reconciliation recovers missed callbacks and starts queued work without an open browser.
 
+Messages distinguish requests, replies, progress, and local processing records. A request receives one automatic final answer. A reply arriving after the sender stopped waiting can activate its recipient once; that activation's final output and attachments are recorded in Activity, with no automatic message back to the peer. Progress never starts FX. This prevents plain-text completion acknowledgments from bouncing indefinitely. Existing messages are classified by correlation and activity, so this change needs no schema migration.
+
+An `a2a send` without `--reply-to` explicitly creates a new request. `--reply-to` must name an actual request from the recipient; replying to a reply or waiting for an answer to a reply is rejected. Agents can explicitly send a meaningful late update to `user`.
+
 The `a2a` CLI supports peer discovery, sending, waiting, and progress. Correlated waits consume progress without treating it as the final reply. Waits are capped at 60 seconds; known ancestor dependency cycles queue without blocking. Timeouts retain the request ID. Agents should finish other work or yield rather than repeatedly block the only active task.
 
 Only explicit messages and selected artifacts cross agent boundaries. For final attachments, the top-level agent writes `.console/artifacts.json`: up to four file paths under `.console/outbox/`, totaling at most 3 MB. Console validates and stores the bytes and materializes private copies for recipients.

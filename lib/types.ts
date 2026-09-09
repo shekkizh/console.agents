@@ -80,6 +80,7 @@ export type MessageDeliveryState =
   | "failed";
 
 export interface ConversationMessageActivity {
+  purpose?: "request" | "reply" | "progress" | "receipt";
   id: string;
   senderType: "human" | "agent" | "system";
   senderId: string;

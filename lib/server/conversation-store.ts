@@ -1,3 +1,4 @@
+import { messagePurposeSql } from "@/lib/message-protocol";
 import { neon } from "@neondatabase/serverless";
 import { requireDatabaseUrl } from "@/lib/server/config";
 import { getAgent } from "@/lib/server/agent-store";
@@ -38,7 +39,14 @@ const selectColumns = `
     ORDER BY message.created_at ASC
     LIMIT 1
   ), c.title) ELSE c.title END AS title,
-  c.status, c.created_at, c.updated_at
+  CASE WHEN c.status = 'working' AND NOT EXISTS (
+    SELECT 1 FROM conversation_messages message
+    JOIN message_deliveries delivery ON delivery.owner_id = message.owner_id AND delivery.message_id = message.id
+    WHERE message.owner_id = c.owner_id AND message.conversation_id = c.id
+      AND delivery.recipient_type = 'agent'
+      AND (delivery.state IN ('claimed', 'running') OR
+        (delivery.state = 'queued' AND ${messagePurposeSql("message")} IN ('request', 'reply')))
+  ) THEN 'completed' ELSE c.status END AS status, c.created_at, c.updated_at
 `;
 
 function toConversation(row: ConversationRow): ConversationProfile {

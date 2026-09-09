@@ -1,3 +1,4 @@
+import { completionDestination, messagePurpose } from "@/lib/message-protocol";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { CapturedArtifact } from "@/lib/server/artifact-capture";
@@ -97,9 +98,7 @@ async function correlatedRequest(context: AgentMessageContext): Promise<Conversa
 }
 
 function replyTarget(context: AgentMessageContext, request: ConversationMessage) {
-  return request.senderType === "agent"
-    ? { recipientType: "agent" as const, recipientId: request.senderId }
-    : { recipientType: "human" as const, recipientId: context.ownerId };
+  return completionDestination(request, context.ownerId, context.agentId);
 }
 
 async function executeTaskProgress(
@@ -127,7 +126,7 @@ async function executeTaskProgress(
     inReplyTo: request.id,
     content: args.content,
     summary: args.summary,
-    metadata: { activity: "progress" },
+    metadata: { activity: "progress", messagePurpose: target.messagePurpose === "receipt" ? "receipt" : "progress" },
     artifacts,
   });
   return {
@@ -172,6 +171,7 @@ async function executeTaskCompletion(
     summary: args.summary,
     metadata: {
       activity: "completion",
+      ...(target.messagePurpose === "receipt" ? { messagePurpose: "receipt" } : {}),
       ...(args.session_id ? { sessionId: args.session_id } : {}),
     },
     artifacts,
@@ -204,6 +204,7 @@ async function executeTaskFailure(context: AgentMessageContext, rawArguments: Re
     senderType: "agent",
     senderId: context.agentId,
     ...replyTarget(context, request),
+    metadata: { messagePurpose: replyTarget(context, request).messagePurpose },
     kind: "error",
     inReplyTo: request.id,
     content: args.content,
@@ -259,6 +260,7 @@ async function messageResult(context: AgentMessageContext, message: Conversation
     },
     inReplyTo: message.inReplyTo,
     kind: message.kind,
+    purpose: messagePurpose(message),
     activity: message.metadata.activity,
     content: message.content,
     summary: message.summary,
@@ -285,6 +287,8 @@ export async function formatMessageEnvelope(input: {
   ]);
   const lines = [
     "[message]",
+    `purpose: ${messagePurpose(input.message)}`,
+    `replyExpected: ${messagePurpose(input.message) === "request"}`,
     `from: ${sender?.name ?? input.message.senderId} (${input.message.senderId})`,
     `messageId: ${input.message.id}`,
     `conversationId: ${input.message.conversationId}`,
@@ -295,6 +299,9 @@ export async function formatMessageEnvelope(input: {
     for (const artifact of artifacts) {
       lines.push(`- ${artifactPath(input.message.id, artifact)} (${artifact.title})`);
     }
+  }
+  if (messagePurpose(input.message) !== "request") {
+    lines.push("handling: This is a result or update, not a new request. Review it as needed. Your final output is recorded locally and is not sent back to the sender. Do not send an acknowledgment or ask for another acknowledgment.");
   }
   lines.push("", input.message.content);
   return lines.join("\n");
@@ -401,10 +408,18 @@ export async function executeMessageOperation(
     const recipient = toHuman
       ? { id: context.ownerId }
       : await resolveAgentRecipient(context.ownerId, context.agentId, args.to);
-    const inReplyTo = args.reply_to ??
-      (!toHuman && recipient.id === context.incomingFromAgentId
-        ? context.incomingMessageId
-        : undefined);
+    const inReplyTo = args.reply_to;
+    if (inReplyTo) {
+      const original = await getConversationMessage(context.ownerId, inReplyTo);
+      if (!original || original.conversationId !== context.conversationId ||
+          original.recipientType !== "agent" || original.recipientId !== context.agentId ||
+          original.senderId !== recipient.id ||
+          original.senderType !== (toHuman ? "human" : "agent") ||
+          messagePurpose(original) !== "request") {
+        throw new Error("reply_to must identify a request from this recipient, not a reply or progress update");
+      }
+      if (args.wait_for_reply) throw new Error("A reply cannot request another reply; send a new request instead");
+    }
     const requestedWait = !toHuman && (args.wait_for_reply ?? !inReplyTo);
     const dependencyCycle = requestedWait && await wouldWaitOnAncestor(context, recipient.id);
     const waitForReply = requestedWait && !dependencyCycle;

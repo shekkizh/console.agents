@@ -1,3 +1,4 @@
+import { messagePurposeSql } from "@/lib/message-protocol";
 import { neon } from "@neondatabase/serverless";
 import { config, requireDatabaseUrl } from "@/lib/server/config";
 import { settleCompletedAgentTask } from "@/lib/server/task-dispatcher";
@@ -13,8 +14,10 @@ export async function reconcileAgentTasks(options: { ownerId?: string; limit?: n
      WHERE a.enabled AND ($1::text IS NULL OR a.owner_id = $1)
        AND EXISTS (
          SELECT 1 FROM message_deliveries d
+         JOIN conversation_messages m ON m.owner_id = d.owner_id AND m.id = d.message_id
          WHERE d.owner_id = a.owner_id AND d.recipient_id = a.id AND d.recipient_type = 'agent'
-           AND (d.state IN ('queued', 'claimed', 'running')
+           AND ((d.state = 'queued' AND ${messagePurposeSql("m")} IN ('request', 'reply'))
+             OR d.state IN ('claimed', 'running')
              OR (d.activation_started_at IS NOT NULL AND d.settled_at IS NULL))
        )
      ORDER BY r.attempted_at ASC NULLS FIRST, a.id LIMIT $2`,

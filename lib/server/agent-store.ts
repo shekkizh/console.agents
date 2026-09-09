@@ -1,3 +1,4 @@
+import { messagePurposeSql } from "@/lib/message-protocol";
 import { createHash } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { config, requireDatabaseUrl } from "@/lib/server/config";
@@ -208,6 +209,7 @@ export async function deleteAgent(
              WHERE message.owner_id = $1 AND message.conversation_id = conversation.id
                AND delivery.recipient_type = 'agent' AND delivery.recipient_id <> $2
                AND delivery.state IN ('queued', 'claimed', 'running')
+               AND ${messagePurposeSql("message")} IN ('request', 'reply')
            ) THEN 'working'
            WHEN EXISTS (
              SELECT 1 FROM settled WHERE settled.conversation_id = conversation.id
