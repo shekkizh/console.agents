@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { a2aCliSource, A2A_CLI_PATH, A2A_CLI_SOURCE_PATH } from "@/lib/a2a-cli";
+import { fxRunnerSource } from "@/lib/fx-runner";
+import { capturePeerArtifact, type CapturedArtifact } from "@/lib/server/artifact-capture";
 import { optionalFxCapabilitiesSchema } from "@/lib/agent-capabilities";
 import type { AgentSandbox } from "@/lib/server/agent-sandbox";
 import {
@@ -18,9 +20,9 @@ import {
   updateAgent,
 } from "@/lib/server/agent-store";
 import { createAgentMessageToken } from "@/lib/server/message-auth";
-import { config, consoleAgentApiUrl, requireAiGatewayApiKey } from "@/lib/server/config";
+import { config, consoleAgentApiUrl } from "@/lib/server/config";
 import { materializeMessageArtifacts } from "@/lib/server/message-runtime";
-import { latestFxCompletionSessionId } from "@/lib/server/message-store";
+import { isMessageDeliveryPending, latestFxCompletionSessionId } from "@/lib/server/message-store";
 import type { AgentProfile } from "@/lib/types";
 
 const CONTROL_PATH = ".console/control-plane.json";
@@ -104,7 +106,7 @@ To create a persistent Console agent or update your own registered configuration
       "name": "Researcher",
       "specialty": "Evidence-backed research",
       "instructions": "Detailed durable operating instructions",
-      "model": "minimax/minimax-m3-free"
+      "model": "${config.defaultFxModel}"
     }
   ]
 }
@@ -112,6 +114,15 @@ To create a persistent Console agent or update your own registered configuration
 
 The other request type is \`update-self\`; it accepts \`requestId\` and profile or runtime settings such as \`model\`, \`skills\`, and \`mcpServers\`. Network access can only be changed by the user in Agent settings. At most five requests are accepted per turn. Agent Console validates and applies them after your turn, then clears the file. Use \`.console/agents.json\` to inspect the current roster. Creating only a local process or subagent does not register a persistent Console agent.
 `;
+}
+
+async function sandboxHome(sandbox: AgentSandbox): Promise<string> {
+  const result = await sandbox.run({ command: 'printf "%s" "$HOME"' });
+  const home = result.stdout.trim();
+  if (result.exitCode !== 0 || !/^\/[A-Za-z0-9._/-]+$/.test(home) || home.split("/").includes("..")) {
+    throw new Error("Sandbox returned an invalid home directory");
+  }
+  return home.replace(/\/$/, "");
 }
 
 async function syncFxCapabilities(sandbox: AgentSandbox, agent: AgentProfile): Promise<void> {
@@ -126,25 +137,48 @@ async function syncFxCapabilities(sandbox: AgentSandbox, agent: AgentProfile): P
     ),
   );
 
-  const homeResult = await sandbox.run({ command: 'printf "%s" "$HOME"' });
-  const home = homeResult.stdout.trim();
-  if (!/^\/[A-Za-z0-9._/-]+$/.test(home) || home.split("/").includes("..")) {
-    throw new Error("Sandbox returned an invalid home directory");
-  }
+  const home = await sandboxHome(sandbox);
   const prepare = await sandbox.run({ command: `mkdir -p '${home}/.fx'` });
   if (prepare.exitCode !== 0) throw new Error("Unable to prepare the fx profile directory");
   await sandbox.writeTextFile(`${home}/.fx/mcp.json`, fxMcpProfileConfig(agent));
 }
 
-async function ensureFxInstalled(sandbox: AgentSandbox): Promise<void> {
+export async function ensureFxInstalled(sandbox: AgentSandbox): Promise<void> {
   const binaryPath = fxBinaryPath(sandbox.root);
-  const probe = await sandbox.run({ command: `test -x '${binaryPath}'` });
-  if (probe.exitCode !== 0) {
-    const install = await sandbox.run({
-      command: fxInstallCommand(config.fxVersion, sandbox.root),
-    });
-    if (install.exitCode !== 0) {
-      throw new Error(`Unable to install fx ${config.fxVersion}: ${install.stderr.slice(0, 500)}`);
+  const version = validateFxVersion(config.fxVersion);
+  const probe = await sandbox.run({ command: `'${binaryPath}' --version` });
+  if (probe.exitCode !== 0 || probe.stdout.trim().replace(/^v/, "") !== version.slice(1)) {
+    const architecture = await sandbox.run({ command: "uname -m" });
+    const target = { x86_64: "linux-x86_64", amd64: "linux-x86_64", aarch64: "linux-aarch64", arm64: "linux-aarch64" }[architecture.stdout.trim()];
+    if (architecture.exitCode !== 0 || !target) throw new Error("Unsupported FX sandbox architecture");
+    const name = `fx-${target}.tar.gz`;
+    const base = fxReleaseBase(version);
+    // Bootstrap downloads occur on the server: restricted agents never need
+    // permanent GitHub access merely to install their runtime.
+    const [archiveResponse, checksumResponse] = await Promise.all([
+      fetch(`${base}/${name}`, { signal: AbortSignal.timeout(60_000) }),
+      fetch(`${base}/${name}.sha256`, { signal: AbortSignal.timeout(60_000) }),
+    ]);
+    if (!archiveResponse.ok || !checksumResponse.ok) throw new Error(`Unable to download FX ${version}`);
+    const archive = new Uint8Array(await archiveResponse.arrayBuffer());
+    const checksum = (await checksumResponse.text()).trim().split(/\s+/)[0];
+    if (!/^[a-f0-9]{64}$/.test(checksum) || createHash("sha256").update(archive).digest("hex") !== checksum) {
+      throw new Error("FX release checksum mismatch");
+    }
+    const archivePath = `${sandbox.root}/.console/fx-install.tar.gz`;
+    await sandbox.writeBinaryFile(archivePath, archive);
+    try {
+      const install = await sandbox.run({ command: `set -eu
+ tmp="$(mktemp -d)"
+ trap 'rm -rf "$tmp"' EXIT
+ tar -xzf '${archivePath}' -C "$tmp"
+ mkdir -p '${sandbox.root}/.console/bin'
+ install -m 0755 "$tmp/fx" '${binaryPath}.new'
+ test "$('${binaryPath}.new' --version)" = '${version.slice(1)}'
+ mv '${binaryPath}.new' '${binaryPath}'` });
+      if (install.exitCode !== 0) throw new Error(`Unable to install FX ${version}`);
+    } finally {
+      await sandbox.removePath(archivePath, { force: true });
     }
   }
   await sandbox.writeTextFile(A2A_CLI_SOURCE_PATH, a2aCliSource());
@@ -186,20 +220,26 @@ function validSessionId(value: string | null): string | undefined {
   return sessionId && /^[A-Za-z0-9._:-]{1,200}$/.test(sessionId) ? sessionId : undefined;
 }
 
+class InvalidControlRequests extends Error {
+  constructor(readonly raw: string, cause: unknown) {
+    super("Invalid FX control-plane requests", { cause });
+  }
+}
+
 async function applyControlRequests(input: {
   ownerId: string;
   agent: AgentProfile;
   sandbox: AgentSandbox;
 }): Promise<{ applied: Array<Record<string, unknown>>; currentAgent: AgentProfile }> {
-  let raw: string | null = null;
-  try {
-    raw = await input.sandbox.readTextFile(CONTROL_PATH);
-  } catch {
-    raw = null;
-  }
+  const raw = await input.sandbox.readTextFile(CONTROL_PATH);
   if (!raw?.trim()) return { applied: [], currentAgent: input.agent };
-  if (raw.length > 64_000) throw new Error("fx control-plane outbox exceeds 64 KB");
-  const envelope = controlEnvelopeSchema.parse(JSON.parse(raw));
+  let envelope: z.infer<typeof controlEnvelopeSchema>;
+  try {
+    if (raw.length > 64_000) throw new Error("FX control-plane outbox exceeds 64 KB");
+    envelope = controlEnvelopeSchema.parse(JSON.parse(raw));
+  } catch (error) {
+    throw new InvalidControlRequests(raw, error);
+  }
   const applied: Array<Record<string, unknown>> = [];
   let currentAgent = input.agent;
 
@@ -259,6 +299,35 @@ function fxJobKey(requestId: string): string {
 export interface RecoveredFxCompletion {
   content: string;
   sessionId: string;
+  artifacts?: CapturedArtifact[];
+}
+
+export interface RecoveredFxFailure {
+  failed: true;
+  content: string;
+}
+
+export function parseRunnerDelivery(raw: string): RecoveredFxCompletion | RecoveredFxFailure {
+  const value = z.object({
+    operation: z.enum(["complete", "fail"]),
+    arguments: z.object({
+      content: z.string().trim().min(1).max(100_000),
+      session_id: z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/).optional(),
+      artifacts: z.array(z.object({ path: z.string(), content_base64: z.string().max(4_200_000) })).max(4).default([]),
+    }),
+  }).parse(JSON.parse(raw));
+  if (value.operation === "fail") return { failed: true, content: value.arguments.content };
+  if (!value.arguments.session_id) throw new Error("Runner completion is missing its session id");
+  let total = 0;
+  const artifacts = value.arguments.artifacts.map((file) => {
+    const content = Buffer.from(file.content_base64, "base64");
+    total += content.length;
+    if (content.toString("base64") !== file.content_base64 || total > 3 * 1024 * 1024) {
+      throw new Error("Runner artifacts are invalid or oversized");
+    }
+    return capturePeerArtifact({ path: file.path, content });
+  });
+  return { content: value.arguments.content, sessionId: value.arguments.session_id, artifacts };
 }
 
 export function extractCommittedFxCompletion(
@@ -299,26 +368,50 @@ export function extractCommittedFxCompletion(
 export async function recoverDetachedFxCompletion(input: {
   sandbox: AgentSandbox;
   incomingMessageId: string;
-}): Promise<"running" | RecoveredFxCompletion | undefined> {
+}): Promise<"running" | RecoveredFxCompletion | RecoveredFxFailure | undefined> {
   const jobDirectory = `.console/jobs/${fxJobKey(input.incomingMessageId)}`;
   const pidFile = `${input.sandbox.root}/${jobDirectory}/worker.pid`;
   const state = await input.sandbox.run({
-    command: `pid="$(cat '${pidFile}' 2>/dev/null || true)"
-if test -n "$pid" && kill -0 "$pid" 2>/dev/null && test -r "/proc/$pid/cmdline" && tr '\\0' ' ' < "/proc/$pid/cmdline" | grep -Fq '/.console/bin/fx ask'; then
-  printf running
-else
-  printf stopped
-fi`,
+    command: `for file in '${pidFile}' '${input.sandbox.root}/${jobDirectory}/fx.pid'; do
+  pid="$(cat "$file" 2>/dev/null || true)"
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  if kill -0 "$pid" 2>/dev/null; then
+    test -r "/proc/$pid/cmdline" || exit 1
+    command_line="$(tr '\\0' ' ' < "/proc/$pid/cmdline")" || exit 1
+    case "$command_line" in
+      *'${jobDirectory}/runner.py'*|*'/.console/bin/fx ask'*) printf running; exit 0 ;;
+    esac
+  fi
+done
+printf stopped`,
   });
+  if (state.exitCode !== 0 || !["running", "stopped"].includes(state.stdout.trim())) {
+    throw new Error("Unable to determine FX worker state");
+  }
   if (state.stdout.trim() === "running") return "running";
 
+  const delivery = await input.sandbox.readTextFile(`${jobDirectory}/delivery.json`);
+  if (delivery) {
+    try {
+      return parseRunnerDelivery(delivery);
+    } catch {
+      return { failed: true, content: "The FX worker produced an invalid final response or attachment. Inspect its private job logs and retry." };
+    }
+  }
+
+  // A managed job with no payload never completed delivery preparation. Do not
+  // turn an uncommitted result into success or silently drop its artifacts.
+  const runner = await input.sandbox.readTextFile(`${jobDirectory}/runner.py`);
+  if (runner) return { failed: true, content: "The FX worker stopped before delivering its result. Inspect its private job logs for details, then retry." };
+
+  const home = await sandboxHome(input.sandbox);
   const located = await input.sandbox.run({
-    command: `find '${input.sandbox.root}/.fx/sessions' -mindepth 2 -maxdepth 2 -type f -name events.jsonl -exec grep -lF -- '${input.incomingMessageId}' {} + | sort`,
+    command: `find '${home}/.fx/sessions' -mindepth 2 -maxdepth 2 -type f -name events.jsonl -exec grep -lF -- '${input.incomingMessageId}' {} + | sort`,
   });
   const eventPaths = located.stdout.trim().split("\n").filter(Boolean).reverse();
   for (const eventPath of eventPaths) {
     if (
-      !eventPath.startsWith(`${input.sandbox.root}/.fx/sessions/`) ||
+      !eventPath.startsWith(`${home}/.fx/sessions/`) ||
       !eventPath.endsWith("/events.jsonl")
     ) {
       continue;
@@ -348,11 +441,19 @@ export async function launchFxTurn(input: {
   if (!/^conversation-[A-Za-z0-9-]+$/.test(input.conversationId)) {
     throw new Error("Invalid conversation id");
   }
-  const previousSession = validSessionId(await latestFxCompletionSessionId({
+  let previousSession = validSessionId(await latestFxCompletionSessionId({
     ownerId: input.ownerId,
     agentId: input.agent.id,
     conversationId: input.conversationId,
   }) ?? null);
+  if (previousSession) {
+    const home = await sandboxHome(input.sandbox);
+    const eligible = await input.sandbox.run({
+      command: `test -f '${home}/.fx/sessions/${previousSession}/session.json' && test ! -f '${home}/.fx/sessions/${previousSession}/subagent/control.json'`,
+    });
+    // Older completion callbacks could save a child session as the resume target.
+    if (eligible.exitCode !== 0) previousSession = undefined;
+  }
   const jobKey = fxJobKey(input.incomingMessageId);
   const jobDirectory = `.console/jobs/${jobKey}`;
   await input.sandbox.removePath(jobDirectory, { recursive: true, force: true });
@@ -361,23 +462,22 @@ export async function launchFxTurn(input: {
   });
   if (prepared.exitCode !== 0) throw new Error("Unable to prepare the FX job directory");
   await input.sandbox.writeTextFile(`${jobDirectory}/prompt.txt`, input.prompt);
+  await input.sandbox.writeTextFile(`${jobDirectory}/runner.py`, fxRunnerSource());
+  await input.sandbox.removePath(".console/artifacts.json", { force: true });
 
-  const resume = previousSession ? '--resume-id "$FX_RESUME_ID"' : "";
-  const binaryPath = fxBinaryPath(input.sandbox.root);
   const command = `set -eu
-echo $$ > '${input.sandbox.root}/${jobDirectory}/worker.pid'
 export PATH="${input.sandbox.root}/.console/bin:$PATH"
 cd '${input.sandbox.root}'
-prompt="$(cat '${input.sandbox.root}/${jobDirectory}/prompt.txt')"
-rm -f '${input.sandbox.root}/${jobDirectory}/prompt.txt'
-exec '${binaryPath}' ask --yolo ${resume} -- "$prompt" >/dev/null 2>&1`;
-  const messageToken = createAgentMessageToken({
+exec python3 '${input.sandbox.root}/${jobDirectory}/runner.py' >'${input.sandbox.root}/${jobDirectory}/launcher.log' 2>&1`;
+  const claims = {
     ownerId: input.ownerId,
     agentId: input.agent.id,
     conversationId: input.conversationId,
     incomingMessageId: input.incomingMessageId,
     incomingFromAgentId: input.incomingFromAgentId,
-  });
+  };
+  const messageToken = createAgentMessageToken({ ...claims, lifecycle: false });
+  const lifecycleToken = createAgentMessageToken({ ...claims, lifecycle: true });
 
   try {
     await input.sandbox.setNetworkPolicy(
@@ -388,11 +488,15 @@ exec '${binaryPath}' ask --yolo ${resume} -- "$prompt" >/dev/null 2>&1`;
       { ownerId: input.ownerId, sandbox: input.sandbox },
       input.incomingMessageId,
     );
+    if (!await isMessageDeliveryPending(input.ownerId, input.incomingMessageId, input.agent.id)) {
+      throw new Error("The FX activation ended before its worker could start");
+    }
     const process = await input.sandbox.spawn({
       command,
       env: {
-        AI_GATEWAY_API_KEY: requireAiGatewayApiKey(),
+        CONSOLE_MODEL_GATEWAY_URL: consoleAgentApiUrl().replace(/\/api\/a2a$/, "/api/model-gateway"),
         CONSOLE_A2A_TOKEN: messageToken,
+        CONSOLE_LIFECYCLE_TOKEN: lifecycleToken,
         CONSOLE_A2A_URL: consoleAgentApiUrl(),
         CONSOLE_WORKSPACE: input.sandbox.root,
         FX_MODEL: input.agent.fxConfig.model,
@@ -414,14 +518,49 @@ export async function finalizeDetachedFxTurn(input: {
   agent: AgentProfile;
   sandbox: AgentSandbox;
 }): Promise<Array<Record<string, unknown>>> {
-  const control = await applyControlRequests(input);
+  let control: Awaited<ReturnType<typeof applyControlRequests>>;
+  try {
+    control = await applyControlRequests(input);
+  } catch (error) {
+    if (!(error instanceof InvalidControlRequests)) throw error;
+    // A malformed agent-authored file must not poison every later activation.
+    // Persist it before removing the source; I/O or database failures still retry.
+    const diagnosticPath = `.console/diagnostics/control-plane-${Date.now()}.json`;
+    await input.sandbox.writeTextFile(diagnosticPath, JSON.stringify({
+      error: error.cause instanceof Error ? error.cause.message : String(error.cause),
+      raw: error.raw,
+    }));
+    await input.sandbox.removePath(CONTROL_PATH, { force: true });
+    console.warn("agent-task.control.quarantined", { agentId: input.agent.id, diagnosticPath });
+    control = { applied: [{ status: "rejected", diagnosticPath }], currentAgent: input.agent };
+  }
   if (control.currentAgent.configVersion !== input.agent.configVersion) {
     await syncFxAgentConfig(input.sandbox, control.currentAgent, await listAgents(input.ownerId));
   }
   await Promise.all(
-    [".console/jobs", ".console/inbox", ".console/outbox"].map((path) =>
-      input.sandbox.removePath(path, { recursive: true, force: true }).catch(() => undefined)
+    [".console/inbox", ".console/outbox", ".console/artifacts.json"].map((path) =>
+      input.sandbox.removePath(path, { recursive: true, force: true })
     ),
   );
   return control.applied;
+}
+
+/** Detect actual FX/runner command lines, not just recyclable PID files. */
+export async function hasLiveFxWorker(sandbox: AgentSandbox): Promise<boolean> {
+  const result = await sandbox.run({ command: `python3 - <<'PYWORKER'
+import pathlib
+root = ${JSON.stringify(sandbox.root)}
+for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
+    try:
+        args = path.read_bytes().split(b'\\0')
+        if any(arg.decode(errors='replace').startswith(root + '/.console/jobs/') and arg.endswith(b'/runner.py') for arg in args) or (args and args[0].decode(errors='replace') == root + '/.console/bin/fx' and b'ask' in args):
+            print('running')
+            break
+    except (OSError, ProcessLookupError):
+        pass
+else:
+    print('stopped')
+PYWORKER` });
+  if (result.exitCode !== 0 || !["running", "stopped"].includes(result.stdout.trim())) throw new Error("Unable to verify FX worker state");
+  return result.stdout.trim() === "running";
 }

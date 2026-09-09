@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS agents (
   name text NOT NULL,
   specialty text NOT NULL,
   instructions text NOT NULL DEFAULT '',
-  fx_config jsonb NOT NULL DEFAULT '{"model":"minimax/minimax-m3-free","networkAccess":"full","networkAllowlist":[]}'::jsonb,
+  fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.3-flash","networkAccess":"full","networkAllowlist":[]}'::jsonb,
   config_version integer NOT NULL DEFAULT 1,
   created_by_agent_id text,
   enabled boolean NOT NULL DEFAULT true,
@@ -15,12 +15,31 @@ CREATE TABLE IF NOT EXISTS agents (
   UNIQUE (owner_id, name)
 );
 
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS fx_config jsonb NOT NULL DEFAULT '{"model":"minimax/minimax-m3-free","networkAccess":"full","networkAllowlist":[]}'::jsonb;
-ALTER TABLE agents ALTER COLUMN fx_config SET DEFAULT '{"model":"minimax/minimax-m3-free","networkAccess":"full","networkAllowlist":[]}'::jsonb;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS fx_config jsonb NOT NULL DEFAULT '{"model":"zai/glm-5.3-flash","networkAccess":"full","networkAllowlist":[]}'::jsonb;
+ALTER TABLE agents ALTER COLUMN fx_config SET DEFAULT '{"model":"zai/glm-5.3-flash","networkAccess":"full","networkAllowlist":[]}'::jsonb;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS config_version integer NOT NULL DEFAULT 1;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_by_agent_id text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+
+-- Apply default-model changes once so later deliberate selections are preserved.
+CREATE TABLE IF NOT EXISTS console_schema_migrations (
+  id text PRIMARY KEY,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+WITH migration AS (
+  INSERT INTO console_schema_migrations (id)
+  VALUES ('20260909-default-glm-5.3-flash')
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id
+)
+UPDATE agents
+SET fx_config = jsonb_set(fx_config, '{model}', '"zai/glm-5.3-flash"'::jsonb),
+    config_version = config_version + 1,
+    updated_at = now()
+WHERE fx_config->>'model' = 'minimax/minimax-m3-free'
+  AND EXISTS (SELECT 1 FROM migration);
 
 CREATE INDEX IF NOT EXISTS agents_owner_updated_idx
   ON agents(owner_id, updated_at DESC);
@@ -129,3 +148,22 @@ CREATE TABLE IF NOT EXISTS message_artifacts (
 
 CREATE INDEX IF NOT EXISTS message_artifacts_message_idx
   ON message_artifacts(owner_id, message_id, created_at ASC);
+
+ALTER TABLE message_deliveries ADD COLUMN IF NOT EXISTS activation_started_at timestamptz;
+ALTER TABLE message_deliveries ADD COLUMN IF NOT EXISTS settled_at timestamptz;
+ALTER TABLE message_deliveries ADD COLUMN IF NOT EXISTS model_request_count integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS message_deliveries_unsettled_idx
+  ON message_deliveries(owner_id, recipient_id, created_at)
+  WHERE activation_started_at IS NOT NULL AND settled_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS agent_reconciliation_state (
+  owner_id text NOT NULL,
+  agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  attempted_at timestamptz NOT NULL DEFAULT now(),
+  last_error text,
+  PRIMARY KEY (owner_id, agent_id)
+);
+
+UPDATE message_deliveries
+SET activation_started_at = COALESCE(running_at, claimed_at, created_at)
+WHERE activation_started_at IS NULL AND state IN ('claimed', 'running');

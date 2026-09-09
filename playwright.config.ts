@@ -29,6 +29,7 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
+      CRON_SECRET: E2E_TOKEN,
       E2E_TEST_MODE: "1",
       CONSOLE_INTERNAL_SECRET: E2E_TOKEN,
       CONSOLE_INTERNAL_URL: E2E_BASE_URL,

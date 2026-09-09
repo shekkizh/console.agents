@@ -1,6 +1,8 @@
 import { after, NextResponse } from "next/server";
 import { z } from "zod";
 import { capturePeerArtifact, type CapturedArtifact } from "@/lib/server/artifact-capture";
+import { isAgentActivationActive } from "@/lib/server/agent-activation";
+import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
 import { verifyAgentMessageToken } from "@/lib/server/message-auth";
 import { executeMessageOperation } from "@/lib/server/message-runtime";
 import { settleCompletedAgentTask } from "@/lib/server/task-dispatcher";
@@ -8,7 +10,7 @@ import { settleCompletedAgentTask } from "@/lib/server/task-dispatcher";
 export const maxDuration = 300;
 
 const requestSchema = z.object({
-  operation: z.enum(["list", "send", "wait", "progress", "complete"]),
+  operation: z.enum(["list", "send", "wait", "progress", "complete", "fail"]),
   arguments: z.record(z.unknown()),
 }).strict();
 
@@ -60,12 +62,18 @@ export async function POST(request: Request) {
 
   try {
     const body = requestSchema.parse(await request.json());
+    if (["complete", "fail"].includes(body.operation) && claims.lifecycle !== true) {
+      return NextResponse.json({ error: "Only the Console launcher can finish a task. Return your final answer to your parent or the launcher." }, { status: 403 });
+    }
+    if (!["complete", "fail"].includes(body.operation) && !await isAgentActivationActive(claims)) {
+      return NextResponse.json({ error: "This activation is no longer active" }, { status: 403 });
+    }
     const args = { ...body.arguments };
     const artifacts = ["send", "progress", "complete"].includes(body.operation)
       ? uploadedArtifacts(args.artifacts)
       : [];
     delete args.artifacts;
-    const result = await executeMessageOperation(
+    const execute = () => executeMessageOperation(
       {
         ownerId: claims.ownerId,
         agentId: claims.agentId,
@@ -78,12 +86,19 @@ export async function POST(request: Request) {
       args,
       artifacts,
     );
-    if (body.operation === "complete") {
+    const result = ["complete", "fail"].includes(body.operation)
+      ? await withAgentLifecycleLock({ ownerId: claims.ownerId, agentId: claims.agentId }, execute)
+      : await execute();
+    if (
+      ["complete", "fail"].includes(body.operation) &&
+      result && typeof result === "object" &&
+      "status" in result && ["completed", "failed", "already_completed", "already_failed"].includes(String(result.status))
+    ) {
       after(() =>
         settleCompletedAgentTask({
           ownerId: claims.ownerId,
           agentId: claims.agentId,
-        }).catch(() => undefined)
+        }).catch((error) => console.error("agent-task.settlement.failed", { agentId: claims.agentId, error }))
       );
     }
     return NextResponse.json(result);

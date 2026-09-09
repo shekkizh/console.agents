@@ -1,4 +1,4 @@
-const DEFAULT_FX_MODEL = "minimax/minimax-m3-free";
+const DEFAULT_FX_MODEL = "zai/glm-5.3-flash";
 const e2eTestMode = process.env.NODE_ENV !== "production" && process.env.E2E_TEST_MODE === "1";
 
 export const config = {
@@ -14,7 +14,7 @@ export const config = {
     process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
   ),
   defaultFxModel: process.env.FX_MODEL ?? DEFAULT_FX_MODEL,
-  fxVersion: process.env.FX_VERSION ?? "v0.0.4",
+  fxVersion: process.env.FX_VERSION ?? "v0.0.8",
   e2eTestMode,
   e2eFakeFx: e2eTestMode && process.env.E2E_FAKE_FX === "1",
   e2eTestOwnerId: e2eTestMode ? process.env.E2E_TEST_OWNER_ID : undefined,

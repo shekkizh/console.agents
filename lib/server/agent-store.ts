@@ -203,6 +203,13 @@ export async function deleteAgent(
          agent_id = $3,
          status = CASE
            WHEN EXISTS (
+             SELECT 1 FROM conversation_messages message
+             JOIN message_deliveries delivery ON delivery.owner_id = message.owner_id AND delivery.message_id = message.id
+             WHERE message.owner_id = $1 AND message.conversation_id = conversation.id
+               AND delivery.recipient_type = 'agent' AND delivery.recipient_id <> $2
+               AND delivery.state IN ('queued', 'claimed', 'running')
+           ) THEN 'working'
+           WHEN EXISTS (
              SELECT 1 FROM settled WHERE settled.conversation_id = conversation.id
            ) THEN 'failed'
            WHEN conversation.status = 'working' THEN 'ready'

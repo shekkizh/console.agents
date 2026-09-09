@@ -16,7 +16,8 @@
     "test": "node --import tsx --test 'tests/**/*.test.ts'",
     "test:integration": "npm run db:migrate && RUN_DATABASE_TESTS=1 node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx --test tests/integration/**/*.test.ts",
     "test:e2e": "node --env-file-if-exists=.env --env-file-if-exists=.env.local ./node_modules/@playwright/test/cli.js test",
-    "test:all": "npm test && npm run test:integration && npm run test:e2e"
+    "test:all": "npm test && npm run test:integration && npm run test:e2e",
+    "worker": "NODE_ENV=development node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx scripts/reconcile.ts"
   },
   "dependencies": {
     "@clerk/backend": "^2.33.6",

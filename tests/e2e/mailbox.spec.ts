@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { neon } from "@neondatabase/serverless";
 import type { AgentProfile, ConversationProfile } from "../../lib/types";
-import { E2E_BASE_URL, E2E_OWNER_ID } from "./constants";
+import { E2E_BASE_URL, E2E_OWNER_ID, E2E_TOKEN } from "./constants";
 import { requireDatabaseUrl } from "../../lib/server/config";
 import { createAgentMessageToken } from "../../lib/server/message-auth";
 import {
@@ -166,6 +166,7 @@ test("accepts signed progress and idempotent completion callbacks", async ({ req
       agentId: agent.id,
       conversationId: conversation.id,
       incomingMessageId: task.id,
+      lifecycle: true,
     })}`,
   };
   const progress = await request.post("/api/a2a", {
@@ -184,6 +185,17 @@ test("accepts signed progress and idempotent completion callbacks", async ({ req
       session_id: "e2e-callback-session",
     },
   };
+  const agentToken = createAgentMessageToken({
+    ownerId: E2E_OWNER_ID, agentId: agent.id, conversationId: conversation.id,
+    incomingMessageId: task.id, lifecycle: false,
+  });
+  for (const operation of ["complete", "fail"]) {
+    const denied = await request.post("/api/a2a", {
+      headers: { authorization: `Bearer ${agentToken}` },
+      data: { operation, arguments: { content: "A subagent must not settle its parent" } },
+    });
+    expect(denied.status()).toBe(403);
+  }
   const completion = await request.post("/api/a2a", { headers, data: completionBody });
   expect(completion.status()).toBe(200);
   expect((await completion.json()).status).toBe("completed");
@@ -197,4 +209,35 @@ test("accepts signed progress and idempotent completion callbacks", async ({ req
     [E2E_OWNER_ID, task.id],
   );
   expect(rows[0]?.state).toBe("completed");
+  for (const operation of ["list", "send", "wait", "progress"]) {
+    const stale = await request.post("/api/a2a", {
+      headers: { authorization: `Bearer ${agentToken}` },
+      data: { operation, arguments: {} },
+    });
+    expect(stale.status()).toBe(403);
+  }
+});
+
+
+test("cron recovers a committed request without a dispatch callback", async ({ request }) => {
+  const agent = ((await (await request.get("/api/agents")).json()) as { agents: AgentProfile[] }).agents[0]!;
+  const conversation = await (await request.post("/api/conversations", { data: { agentId: agent.id } })).json() as ConversationProfile;
+  const message = await publishConversationMessage({
+    ownerId: E2E_OWNER_ID, conversationId: conversation.id,
+    senderType: "human", senderId: E2E_OWNER_ID,
+    recipientType: "agent", recipientId: agent.id,
+    content: "E2E_FAKE delay=10 reply=CRON_RECOVERED",
+  });
+  // General is protected; a rejected deletion must not cancel its queued task.
+  expect((await request.delete(`/api/agents/${agent.id}`)).status()).toBe(400);
+  const before = await database().query("SELECT state FROM message_deliveries WHERE owner_id=$1 AND message_id=$2", [E2E_OWNER_ID, message.id]);
+  expect(before[0]?.state).toBe("queued");
+  const recovered = await request.get("/api/internal/reconcile", { headers: { authorization: `Bearer ${E2E_TOKEN}` } });
+  expect(recovered.status()).toBe(200);
+  const rows = await database().query("SELECT content FROM conversation_messages WHERE owner_id=$1 AND in_reply_to=$2", [E2E_OWNER_ID, message.id]);
+  expect(rows.map((row) => row.content)).toEqual(["CRON_RECOVERED"]);
+  const replay = await request.get("/api/internal/reconcile", { headers: { authorization: `Bearer ${E2E_TOKEN}` } });
+  expect(replay.status()).toBe(200);
+  const count = await database().query("SELECT count(*)::int AS replies FROM conversation_messages WHERE owner_id=$1 AND in_reply_to=$2", [E2E_OWNER_ID, message.id]);
+  expect(count[0]?.replies).toBe(1);
 });

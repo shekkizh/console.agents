@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { optionalFxCapabilitiesSchema, optionalFxNetworkSchema } from "@/lib/agent-capabilities";
+import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
+import { stopAgentWorkers } from "@/lib/server/lifecycle-actions";
 import { requireOwner } from "@/lib/server/auth";
-import { deleteAgent, updateAgent } from "@/lib/server/agent-store";
+import { defaultAgentId, deleteAgent, updateAgent } from "@/lib/server/agent-store";
+
+export const maxDuration = 300;
 
 const updateSchema = z
   .object({
@@ -22,7 +26,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ agent
     const { agentId } = await context.params;
     const input = updateSchema.parse(await request.json());
     return NextResponse.json(
-      await updateAgent(ownerId, agentId, input, { type: "human", id: ownerId }),
+      await withAgentLifecycleLock({ ownerId, agentId }, async () => {
+        if (input.enabled === false) await stopAgentWorkers(ownerId, agentId);
+        return updateAgent(ownerId, agentId, input, { type: "human", id: ownerId });
+      }),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update agent";
@@ -37,7 +44,11 @@ export async function DELETE(_request: Request, context: { params: Promise<{ age
   try {
     const ownerId = await requireOwner();
     const { agentId } = await context.params;
-    return NextResponse.json(await deleteAgent(ownerId, agentId));
+    return NextResponse.json(await withAgentLifecycleLock({ ownerId, agentId }, async () => {
+      if (agentId === defaultAgentId(ownerId)) throw new Error("The General agent cannot be deleted");
+      await stopAgentWorkers(ownerId, agentId);
+      return deleteAgent(ownerId, agentId);
+    }));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to delete agent";
     return NextResponse.json(
