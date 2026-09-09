@@ -241,3 +241,41 @@ test("cron recovers a committed request without a dispatch callback", async ({ r
   const count = await database().query("SELECT count(*)::int AS replies FROM conversation_messages WHERE owner_id=$1 AND in_reply_to=$2", [E2E_OWNER_ID, message.id]);
   expect(count[0]?.replies).toBe(1);
 });
+
+test("a signed peer result ends in a processing note instead of another peer request", async ({ request }) => {
+  const a = ((await (await request.get("/api/agents")).json()) as { agents: AgentProfile[] }).agents[0]!;
+  const b = await (await request.post("/api/agents", { data: {
+    name: "Peer reviewer", specialty: "Review", instructions: "Review the requested implementation",
+  } })).json() as AgentProfile;
+  const conversation = await (await request.post("/api/conversations", { data: { agentId: a.id } })).json() as ConversationProfile;
+  const task = await publishConversationMessage({
+    ownerId: E2E_OWNER_ID, conversationId: conversation.id,
+    senderType: "agent", senderId: a.id, recipientType: "agent", recipientId: b.id,
+    content: "Review this implementation",
+  });
+  await nextPendingAgentMessage({ ownerId: E2E_OWNER_ID, agentId: b.id });
+  const headers = { authorization: `Bearer ${createAgentMessageToken({
+    ownerId: E2E_OWNER_ID, agentId: b.id, conversationId: conversation.id,
+    incomingMessageId: task.id, lifecycle: true,
+  })}` };
+  const body = { operation: "complete", arguments: {
+    content: "E2E_FAKE delay=0 reply=REVIEW_PROCESSED", session_id: "peer-review-session",
+  } };
+  expect((await request.post("/api/a2a", { headers, data: body })).status()).toBe(200);
+  // No waiting parent: cron must process the late result once without bouncing it.
+  expect((await request.get("/api/internal/reconcile")).status()).toBe(200);
+  expect((await request.post("/api/a2a", { headers, data: body })).status()).toBe(200);
+  expect((await request.get("/api/internal/reconcile")).status()).toBe(200);
+  const rows = await database().query("SELECT sender_id,recipient_id,metadata->>'messagePurpose' AS purpose FROM conversation_messages WHERE owner_id=$1 AND conversation_id=$2 ORDER BY created_at", [E2E_OWNER_ID, conversation.id]);
+  expect(rows).toEqual([
+    { sender_id: a.id, recipient_id: b.id, purpose: null },
+    { sender_id: b.id, recipient_id: a.id, purpose: null },
+    { sender_id: a.id, recipient_id: a.id, purpose: "receipt" },
+  ]);
+  const response = await (await request.get(`/api/conversations/${conversation.id}`)).json();
+  expect(response.conversation.status).toBe("completed");
+  expect(response.activity.at(-1).purpose).toBe("receipt");
+  expect(response.activity.at(-1).content).toBe("REVIEW_PROCESSED");
+  const pending = await database().query("SELECT count(*)::int AS count FROM message_deliveries WHERE owner_id=$1 AND state IN ('queued','claimed','running')", [E2E_OWNER_ID]);
+  expect(pending[0]?.count).toBe(0);
+});

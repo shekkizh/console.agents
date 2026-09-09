@@ -1,3 +1,4 @@
+import { messagePurposeSql } from "@/lib/message-protocol";
 import { neon } from "@neondatabase/serverless";
 import { getAgent, listAgents } from "@/lib/server/agent-store";
 import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
@@ -69,6 +70,7 @@ export async function stopAgentWorkers(ownerId: string, agentId: string) {
        AND NOT EXISTS (SELECT 1 FROM conversation_messages m JOIN message_deliveries d
          ON d.owner_id = m.owner_id AND d.message_id = m.id
          WHERE m.owner_id = c.owner_id AND m.conversation_id = c.id
-           AND d.state IN ('queued', 'claimed', 'running'))`, [ownerId, agentId],
+           AND d.state IN ('queued', 'claimed', 'running')
+           AND ${messagePurposeSql("m")} IN ('request', 'reply'))`, [ownerId, agentId],
   );
 }

@@ -1,3 +1,4 @@
+import { completionDestination } from "@/lib/message-protocol";
 import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
 import { createHash } from "node:crypto";
 import { acquireAgentSandbox } from "@/lib/server/agent-sandbox";
@@ -158,12 +159,11 @@ async function dispatchNextAgentTaskLocked(input: {
         conversationId: request.conversationId,
         senderType: "agent",
         senderId: input.agentId,
-        recipientType: request.senderType === "agent" ? "agent" : "human",
-        recipientId: request.senderType === "agent" ? request.senderId : input.ownerId,
+        ...completionDestination(request, input.ownerId, input.agentId),
         kind: "error",
         inReplyTo: request.id,
         content: "The agent could not start this request. Your message was preserved and can be retried safely.",
-        metadata: { diagnostic },
+        metadata: { diagnostic, messagePurpose: completionDestination(request, input.ownerId, input.agentId).messagePurpose },
       });
       await markMessageDelivery(
         input.ownerId,

@@ -1,3 +1,4 @@
+import { messagePurpose, messagePurposeSql } from "@/lib/message-protocol";
 import { Client, neon } from "@neondatabase/serverless";
 import type { CapturedArtifact } from "@/lib/server/artifact-capture";
 import { requireDatabaseListenerUrl, requireDatabaseUrl } from "@/lib/server/config";
@@ -240,7 +241,9 @@ export async function publishConversationMessage(input: {
 
   const sql = database();
   const id = input.id ?? crypto.randomUUID();
-  const deliveryState = input.recipientType === "human" ? "completed" : "queued";
+  const purpose = messagePurpose(input);
+  const deliveryState = input.recipientType === "human" || purpose === "receipt" ? "completed" : "queued";
+  const wakesAgent = input.recipientType === "agent" && ["request", "reply"].includes(purpose);
   const insertMessage = sql.query(
     `INSERT INTO conversation_messages
        (owner_id, id, conversation_id, sender_type, sender_id,
@@ -318,9 +321,9 @@ export async function publishConversationMessage(input: {
            status = CASE WHEN $3::boolean THEN 'working' ELSE status END,
            updated_at = now()
          WHERE owner_id = $1 AND id = $2`,
-        [input.ownerId, conversationId, input.recipientType === "agent"],
+        [input.ownerId, conversationId, wakesAgent],
       );
-  const notify = input.recipientType === "agent"
+  const notify = input.recipientType === "agent" && purpose !== "receipt"
     ? sql.query(`SELECT pg_notify('${MESSAGE_CHANNEL}', $1)`, [
         notificationKey(input.ownerId, input.recipientId),
       ])
@@ -382,6 +385,7 @@ export async function markMessageDelivery(
            AND message.conversation_id = conversation.id
            AND delivery.recipient_type = 'agent'
            AND delivery.state IN ('queued', 'claimed', 'running')
+           AND ${messagePurposeSql("message")} IN ('request', 'reply')
        ) THEN 'working'
        WHEN $3 = 'failed' AND EXISTS (
          SELECT 1
@@ -443,6 +447,7 @@ export async function nextPendingAgentMessage(input: {
          AND delivery.recipient_type = 'agent'
          AND delivery.recipient_id = $2
          AND delivery.state = 'queued'
+         AND ${messagePurposeSql("message")} IN ('request', 'reply')
          AND guard.acquired
          AND NOT EXISTS (
            SELECT 1
@@ -551,7 +556,8 @@ export async function claimConversationMessages(input: {
        WHERE delivery.owner_id = $1
          AND delivery.recipient_type = 'agent'
          AND delivery.recipient_id = $2
-         AND delivery.state IN ('queued', 'claimed')
+         AND delivery.state = 'queued'
+         AND ${messagePurposeSql("message")} <> 'receipt'
          AND message.conversation_id = $3
          AND message.sender_type = 'agent'
          AND ($4::text IS NULL OR message.sender_id = $4)
@@ -737,7 +743,7 @@ export async function listConversationActivity(
          WHEN message.recipient_type = 'human' THEN 'You'
          ELSE COALESCE(recipient.name, message.recipient_id)
        END AS recipient_name,
-       message.kind, message.in_reply_to, message.content, message.summary,
+       message.kind, message.in_reply_to, message.content, message.summary, message.metadata,
        message.created_at, delivery.state,
        (SELECT count(*)::int FROM message_artifacts artifact
         WHERE artifact.owner_id = message.owner_id
@@ -761,6 +767,9 @@ export async function listConversationActivity(
       senderType: row.sender_type as MessageParticipantType,
       senderId: String(row.sender_id),
       senderName: String(row.sender_name),
+      purpose: messagePurpose({ senderType: String(row.sender_type), senderId: String(row.sender_id),
+        kind: String(row.kind), inReplyTo: typeof row.in_reply_to === "string" ? row.in_reply_to : null,
+        metadata: row.metadata as Record<string, unknown> }),
       recipientType: row.recipient_type as MessageRecipientType,
       recipientId: String(row.recipient_id),
       recipientName: String(row.recipient_name),

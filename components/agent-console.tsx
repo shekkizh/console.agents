@@ -386,10 +386,11 @@ function ConversationActivityLog({
           <article className="rounded-2xl border bg-card p-4 shadow-sm sm:p-5" key={message.id}>
             <div className="flex flex-wrap items-center gap-2">
               <strong className="text-sm">{message.senderName}</strong>
-              <ArrowRightIcon className="size-3.5 text-muted-foreground" />
-              <strong className="text-sm">{message.recipientName}</strong>
+              {message.purpose === "receipt" ? (
+                <span className="text-xs text-muted-foreground">Processing note · not sent</span>
+              ) : <><ArrowRightIcon className="size-3.5 text-muted-foreground" /><strong className="text-sm">{message.recipientName}</strong></>}
               <Badge className="ml-auto" variant={message.state === "failed" ? "destructive" : message.state === "queued" ? "secondary" : "outline"}>
-                {activityStateLabel(message.state)}
+                {message.purpose === "receipt" ? "Recorded" : activityStateLabel(message.state)}
               </Badge>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
