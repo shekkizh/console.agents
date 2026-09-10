@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -32,6 +33,7 @@ import {
   Trash2Icon,
   TriangleIcon,
 } from "lucide-react";
+import { useForegroundPolling } from "@/lib/foreground-polling";
 import { Markdown } from "@/components/markdown";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -431,6 +433,8 @@ function AgentChat({
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
+  const [pollingPaused, setPollingPaused] = useState(false);
+  const [monitoringSession, setMonitoringSession] = useState(0);
   const [retrying, setRetrying] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [savedMessages, setSavedMessages] = useState<AgentMessage[]>([]);
@@ -475,32 +479,28 @@ function AgentChat({
     })),
     [savedMessages],
   );
-  const latestEntry = entries.at(-1);
-  const awaitingFx = latestEntry?.role === "user" && !latestEntry.failed;
-  const working = awaitingFx || conversation.status === "working";
+  const working = submitting || conversation.status === "working";
   const lastRequest = [...savedMessages].reverse().find((entry) => entry.role === "user");
 
+  const lastRecoveryCheck = useRef(0);
+  useEffect(() => { lastRecoveryCheck.current = Date.now(); }, []);
+  const wasWorking = useRef(working);
+  useForegroundPolling(working, 5_000, async () => {
+    const recover = Date.now() - lastRecoveryCheck.current >= 60_000;
+    if (recover) lastRecoveryCheck.current = Date.now();
+    await refreshMessages(recover);
+  }, () => setPollingPaused(true), monitoringSession);
   useEffect(() => {
-    if (!working) return;
-    let ticks = 0;
-    let inFlight = false;
-    const timer = window.setInterval(() => {
-      if (inFlight) return;
-      inFlight = true;
-      // Probe the worker every 30 seconds as well as on explicit refresh.
-      void refreshMessages(++ticks % 20 === 0).finally(() => { inFlight = false; });
-      refreshConversations();
-      refreshRoster();
-    }, 1_500);
-    return () => window.clearInterval(timer);
-  }, [
-    working,
-    refreshConversations,
-    refreshMessages,
-    refreshRoster,
-  ]);
+    if (wasWorking.current && !working) {
+      void refreshConversations();
+      void refreshRoster();
+    }
+    wasWorking.current = working;
+  }, [working, refreshConversations, refreshRoster]);
 
   async function dispatchMessage(message: string, existingMessageId?: string) {
+    setPollingPaused(false);
+    setMonitoringSession((session) => session + 1);
     const messageId = existingMessageId ?? crypto.randomUUID();
     setSavedMessages((current) => current.some((entry) => entry.requestId === messageId)
       ? current
@@ -579,6 +579,10 @@ function AgentChat({
       refreshConversations();
       refreshRoster();
       if (!refreshed) setLocalError("Unable to refresh this conversation");
+      else {
+        setPollingPaused(false);
+        setMonitoringSession((session) => session + 1);
+      }
     } finally {
       setRefreshing(false);
     }
@@ -755,6 +759,12 @@ function AgentChat({
 
       <div className="border-t bg-background/95 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-md sm:px-6">
         <div className="mx-auto w-full max-w-[var(--chat-content-width)]">
+          {pollingPaused && working ? (
+            <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl bg-muted px-3 py-2 text-xs text-muted-foreground" role="status">
+              <span>Automatic updates paused after 15 minutes. Your agents can keep working.</span>
+              <Button disabled={refreshing} onClick={refreshConversation} size="xs" type="button" variant="outline">Resume updates</Button>
+            </div>
+          ) : null}
           {localError ? (
             <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl bg-destructive/10 px-3 py-2 text-xs text-destructive">
               <span>{localError}</span>
@@ -1153,11 +1163,10 @@ function AgentConsoleContent({
     [conversations, startConversation],
   );
 
-  useEffect(() => {
-    if (!conversations.some((conversation) => conversation.status === "working")) return;
-    const interval = window.setInterval(() => void refreshConversations(), 1_500);
-    return () => window.clearInterval(interval);
-  }, [conversations, refreshConversations]);
+  const otherConversationWorking = conversations.some((conversation) =>
+    conversation.id !== selectedConversationId && conversation.status === "working"
+  );
+  useForegroundPolling(otherConversationWorking, 15_000, refreshConversations);
 
   if (!selected || !selectedConversation) return null;
 

@@ -5,7 +5,7 @@ import { isAgentActivationActive } from "@/lib/server/agent-activation";
 import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
 import { verifyAgentMessageToken } from "@/lib/server/message-auth";
 import { executeMessageOperation } from "@/lib/server/message-runtime";
-import { settleCompletedAgentTask } from "@/lib/server/task-dispatcher";
+import { reconcileAgentTasks } from "@/lib/server/reconciler";
 
 export const maxDuration = 300;
 
@@ -94,10 +94,12 @@ export async function POST(request: Request) {
       result && typeof result === "object" &&
       "status" in result && ["completed", "failed", "already_completed", "already_failed"].includes(String(result.status))
     ) {
+      // The owner's agents can have queued work in other conversations, so resume
+      // work across conversations now that there is no recurring reconcile cron.
       after(() =>
-        settleCompletedAgentTask({
+        reconcileAgentTasks({
           ownerId: claims.ownerId,
-          agentId: claims.agentId,
+          includeActive: false,
         }).catch((error) => console.error("agent-task.settlement.failed", { agentId: claims.agentId, error }))
       );
     }

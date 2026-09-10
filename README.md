@@ -8,7 +8,7 @@ Clerk authenticates the UI. Next.js authorizes and persists messages, dispatches
 
 A database lifecycle lock serializes launch, recovery, cleanup, and stop operations for each agent. Different registered agents run concurrently. A delivery is activated once; a retry is a new message with a new token. Expired claims are inspected and failed or recovered rather than blindly restarted. Persisted settlement markers let the reconciler finish cleanup after a server restart before launching the next task.
 
-The sandbox launcher runs `fx ask --json`, waits for the top-level process, and delivers FX's `final_output` and actual parent session ID. Messaging tokens cannot complete or fail tasks. The launcher saves the callback payload before sending it and retries three times. Scheduled reconciliation recovers missed callbacks and starts queued work without an open browser.
+The sandbox launcher runs `fx ask --json`, waits for the top-level process, and delivers FX's `final_output` and actual parent session ID. Messaging tokens cannot complete or fail tasks. The launcher saves the callback payload before sending it and retries three times. Completion callbacks reconcile only their own conversation, settling finished tasks and dispatching queued late replies. No recurring production recovery job runs while the app is idle.
 
 Messages distinguish requests, replies, progress, and local processing records. A request receives one automatic final answer. A reply arriving after the sender stopped waiting can activate its recipient once; that activation's final output and attachments are recorded in Activity, with no automatic message back to the peer. Progress never starts FX. This prevents plain-text completion acknowledgments from bouncing indefinitely. Existing messages are classified by correlation and activity, so this change needs no schema migration.
 
@@ -40,7 +40,7 @@ npm run db:migrate
 npm run dev
 ```
 
-Run `npm run worker` in another terminal for independent local recovery, or `npm run worker -- --once` for a single pass. Production uses the minute-by-minute cron in `vercel.json`; set a random `CRON_SECRET` on Vercel. The endpoint rejects requests without it. Minute-level scheduling requires a Vercel plan that supports that frequency. See [Vercel cron configuration](https://vercel.com/docs/cron-jobs/manage-cron-jobs).
+Production schedules no cron jobs. Recovery runs from completion callbacks and explicit conversation recovery requests. `CRON_SECRET` is optional and only protects manual calls to `/api/internal/reconcile`; keeping an existing value causes no recurring traffic. `npm run worker -- --once` runs one local recovery pass; the continuous local worker is an explicit development tool, not a production requirement.
 
 The pinned FX release is **v0.0.8**. Existing sandbox binaries are upgraded on their next activation. Agents default to `zai/glm-5.3-flash`; `FX_MODEL` overrides the creation default. A one-time migration updates existing agents using the previous default while preserving custom models. Already-running processes pick up changes on their next activation.
 
@@ -71,7 +71,9 @@ It creates and removes a disposable owner and Microsandbox, tests actual model i
 
 Each activation retains `.console/jobs/<request-hash>/stdout.json`, `stderr.log`, `status.json`, `worker.pid`, `fx.pid`, and its prepared `delivery.json`. Startup failures appear in `launcher.log` or `runner-error.log`. `gateway-events.jsonl` records bounded connection diagnostics without request bodies or credentials. Task output can contain private content; job files currently require manual retention management.
 
-The reconciler inspects active workers after a 30-second startup grace period. A dead worker with a saved response is recovered; one without a valid result becomes a visible failure. Failures in scheduled reconciliation are recorded in `agent_reconciliation_state` and server logs. The UI also requests recovery while a conversation is open.
+The UI checks the selected working conversation every five seconds and other working conversations every fifteen seconds. It does not repeatedly refresh the agent roster. Polling pauses in hidden tabs, never overlaps requests, and stops after fifteen minutes. Refresh or Resume updates starts a new monitoring window without resubmitting the task. This is a browser monitoring limit only: it does not cancel tasks, expire their access, or stop sandboxes. Sandboxes are stopped after their work finishes and no live FX worker remains; the existing provider lifetime setting is unchanged. Worker inspection is requested at most once per minute during those visible active checks. Ordinary status reads do not acquire sandboxes or dispatch work.
+
+There is no scheduled idle recovery. If a launcher and all callback retries fail while Console is closed, the durable request remains pending until a user opens/refreshes it or explicitly invokes recovery. A dead worker with a saved result is recovered; one without a result is failed. Recovery failures remain recorded in `agent_reconciliation_state` and server logs. Deploy the empty cron configuration before resuming a paused production project.
 
 An FX `recovery_checkpoint_set` labeled `network_interrupted` is not sufficient evidence of a network failure: FX can write that checkpoint before a normal request. Check process state, Gateway diagnostics, stderr, and later session events.
 

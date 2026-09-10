@@ -134,3 +134,19 @@ test("deleting an agent preserves conversation history and other peers' active w
   assert.equal((await getConversationMessage(ownerId, peerRequest.id))?.senderId, removed.id);
   assert.equal(await isAgentActivationActive({ ownerId, agentId: general.id, conversationId: conversation.id, incomingMessageId: peerRequest.id }), true);
 });
+
+test("an active task retains messaging and model access beyond the browser monitoring window", { skip: !enabled }, async (t) => {
+  const { ownerId, sql, agent, conversation, send } = await fixture(t, "deadline");
+  const { createAgentMessageToken } = await import("../../lib/server/message-auth.ts");
+  const { authorizeModelRequest } = await import("../../lib/server/model-gateway-auth.ts");
+  const request = await send();
+  await nextPendingAgentMessage({ ownerId, agentId: agent.id });
+  const claims = { ownerId, agentId: agent.id, conversationId: conversation.id, incomingMessageId: request.id };
+  const token = createAgentMessageToken(claims);
+  assert.equal(await isAgentActivationActive(claims), true);
+  assert.ok(await authorizeModelRequest(token, false));
+  await sql.query("UPDATE message_deliveries SET activation_started_at = now() - interval '16 minutes' WHERE owner_id=$1 AND message_id=$2", [ownerId, request.id]);
+  assert.equal(await isAgentActivationActive(claims), true);
+  assert.ok(await authorizeModelRequest(token, true));
+  assert.equal(await nextPendingAgentMessage({ ownerId, agentId: agent.id }), undefined, "active work must not be restarted");
+});

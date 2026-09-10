@@ -1,6 +1,7 @@
 import { completionDestination } from "@/lib/message-protocol";
 import { withAgentLifecycleLock } from "@/lib/server/agent-lifecycle";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { acquireAgentSandbox } from "@/lib/server/agent-sandbox";
 import { getAgent, listAgents } from "@/lib/server/agent-store";
 import { config } from "@/lib/server/config";
@@ -184,7 +185,15 @@ export function dispatchNextAgentTask(input: { ownerId: string; agentId: string 
 
 export function settleCompletedAgentTask(input: { ownerId: string; agentId: string }): Promise<DispatchOutcome> {
   return withAgentLifecycleLock(input, async () => {
-    const next = await dispatchNextAgentTaskLocked(input);
+    let next = await dispatchNextAgentTaskLocked(input);
+    // The launcher can still be exiting just after the HTTP callback returns.
+    // Retry settlement briefly here rather than relying on a recurring cron.
+    for (let attempt = 0; next.status === "active" && attempt < 3; attempt++) {
+      if (await hasActiveAgentDelivery(input.ownerId, input.agentId) ||
+          !await getUnsettledAgentDelivery(input.ownerId, input.agentId)) break;
+      await delay(250);
+      next = await dispatchNextAgentTaskLocked(input);
+    }
     if (!config.e2eFakeFx && next.status === "idle") {
       const agent = await getAgent(input.ownerId, input.agentId);
       if (agent) {
