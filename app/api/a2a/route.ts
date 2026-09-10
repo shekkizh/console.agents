@@ -94,10 +94,11 @@ export async function POST(request: Request) {
       result && typeof result === "object" &&
       "status" in result && ["completed", "failed", "already_completed", "already_failed"].includes(String(result.status))
     ) {
+      // The owner's agents can have queued work in other conversations, so resume
+      // work across conversations now that there is no recurring reconcile cron.
       after(() =>
         reconcileAgentTasks({
           ownerId: claims.ownerId,
-          conversationId: claims.conversationId,
           includeActive: false,
         }).catch((error) => console.error("agent-task.settlement.failed", { agentId: claims.agentId, error }))
       );
