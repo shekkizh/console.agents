@@ -219,7 +219,7 @@ test("accepts signed progress and idempotent completion callbacks", async ({ req
 });
 
 
-test("cron recovers a committed request without a dispatch callback", async ({ request }) => {
+test("manual recovery handles a committed request without a dispatch callback", async ({ request }) => {
   const agent = ((await (await request.get("/api/agents")).json()) as { agents: AgentProfile[] }).agents[0]!;
   const conversation = await (await request.post("/api/conversations", { data: { agentId: agent.id } })).json() as ConversationProfile;
   const message = await publishConversationMessage({
@@ -262,10 +262,12 @@ test("a signed peer result ends in a processing note instead of another peer req
     content: "E2E_FAKE delay=0 reply=REVIEW_PROCESSED", session_id: "peer-review-session",
   } };
   expect((await request.post("/api/a2a", { headers, data: body })).status()).toBe(200);
-  // No waiting parent: cron must process the late result once without bouncing it.
-  expect((await request.get("/api/internal/reconcile")).status()).toBe(200);
+  // No browser refresh or cron: the completion callback dispatches the late reply.
+  await expect.poll(async () => {
+    const rows = await database().query("SELECT count(*)::int AS count FROM conversation_messages WHERE owner_id=$1 AND conversation_id=$2 AND metadata->>'messagePurpose'='receipt'", [E2E_OWNER_ID, conversation.id]);
+    return rows[0]?.count;
+  }).toBe(1);
   expect((await request.post("/api/a2a", { headers, data: body })).status()).toBe(200);
-  expect((await request.get("/api/internal/reconcile")).status()).toBe(200);
   const rows = await database().query("SELECT sender_id,recipient_id,metadata->>'messagePurpose' AS purpose FROM conversation_messages WHERE owner_id=$1 AND conversation_id=$2 ORDER BY created_at", [E2E_OWNER_ID, conversation.id]);
   expect(rows).toEqual([
     { sender_id: a.id, recipient_id: b.id, purpose: null },
@@ -278,4 +280,67 @@ test("a signed peer result ends in a processing note instead of another peer req
   expect(response.activity.at(-1).content).toBe("REVIEW_PROCESSED");
   const pending = await database().query("SELECT count(*)::int AS count FROM message_deliveries WHERE owner_id=$1 AND state IN ('queued','claimed','running')", [E2E_OWNER_ID]);
   expect(pending[0]?.count).toBe(0);
+});
+
+test("ordinary status reads do not dispatch or recover work", async ({ request }) => {
+  const agent = ((await (await request.get("/api/agents")).json()) as { agents: AgentProfile[] }).agents[0]!;
+  const conversation = await (await request.post("/api/conversations", { data: { agentId: agent.id } })).json() as ConversationProfile;
+  const task = await publishConversationMessage({
+    ownerId: E2E_OWNER_ID, conversationId: conversation.id, senderType: "human", senderId: E2E_OWNER_ID,
+    recipientType: "agent", recipientId: agent.id, content: "E2E_FAKE delay=10 reply=EXPLICIT_RECOVERY",
+  });
+  const read = await request.get(`/api/conversations/${conversation.id}`);
+  expect(read.status()).toBe(200);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const rows = await database().query("SELECT state FROM message_deliveries WHERE owner_id=$1 AND message_id=$2", [E2E_OWNER_ID, task.id]);
+  expect(rows[0]?.state).toBe("queued");
+  expect((await request.get(`/api/conversations/${conversation.id}?recover=1`)).status()).toBe(200);
+  await expect.poll(async () => {
+    const rows = await database().query("SELECT state FROM message_deliveries WHERE owner_id=$1 AND message_id=$2", [E2E_OWNER_ID, task.id]);
+    return rows[0]?.state;
+  }).toBe("completed");
+});
+
+test("pausing browser updates does not stop work and monitoring can resume", async ({ page, request }) => {
+  test.setTimeout(30_000);
+  const agent = ((await (await request.get("/api/agents")).json()) as { agents: AgentProfile[] }).agents[0]!;
+  const conversation = await (await request.post("/api/conversations", { data: { agentId: agent.id } })).json() as ConversationProfile;
+  const task = await publishConversationMessage({
+    ownerId: E2E_OWNER_ID, conversationId: conversation.id, senderType: "human", senderId: E2E_OWNER_ID,
+    recipientType: "agent", recipientId: agent.id, content: "Browser monitoring fixture",
+  });
+  // Keep status stable without launching an FX process or invoking recovery.
+  const body = await (await request.get(`/api/conversations/${conversation.id}`)).json();
+  let reads = 0;
+  const mutations: string[] = [];
+  page.on("request", (incoming) => {
+    if (incoming.url().includes("/api/") && incoming.method() !== "GET") mutations.push(incoming.url());
+  });
+  await page.route(`**/api/conversations/${conversation.id}{,?*}`, async (route) => {
+    reads++;
+    await route.fulfill({ json: body });
+  });
+  await page.clock.install();
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "Message General" })).toBeVisible();
+  await expect.poll(() => reads, { timeout: 5000 }).toBeGreaterThan(0);
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  const initialReads = reads;
+  await page.clock.fastForward(5_100);
+  await expect.poll(() => reads, { timeout: 5000 }).toBe(initialReads + 1);
+  await page.clock.fastForward(15 * 60_000);
+  const resume = page.getByRole("button", { name: "Resume updates" });
+  await expect(resume).toBeVisible();
+  const pausedReads = reads;
+  await page.clock.fastForward(60_000);
+  expect(reads).toBe(pausedReads);
+  expect(mutations).toEqual([]);
+  await resume.click();
+  await expect(resume).toBeHidden();
+  await expect.poll(() => reads).toBe(pausedReads + 1);
+  await page.clock.fastForward(5_100);
+  await expect.poll(() => reads, { timeout: 5000 }).toBe(pausedReads + 2);
+  expect(mutations).toEqual([]);
+  const rows = await database().query("SELECT state FROM message_deliveries WHERE owner_id=$1 AND message_id=$2", [E2E_OWNER_ID, task.id]);
+  expect(rows[0]?.state).toBe("queued");
 });
