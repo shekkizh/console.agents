@@ -17,6 +17,7 @@ An `a2a send` without `--reply-to` explicitly creates a new request. `--reply-to
 The `a2a` CLI supports peer discovery, sending, waiting, and progress. Correlated waits consume progress without treating it as the final reply. Waits are capped at 60 seconds; known ancestor dependency cycles queue without blocking. Timeouts retain the request ID. Agents should finish other work or yield rather than repeatedly block the only active task.
 
 Only explicit messages and selected artifacts cross agent boundaries. For final attachments, the top-level agent writes `.console/artifacts.json`: up to four file paths under `.console/outbox/`, totaling at most 3 MB. Console validates and stores the bytes and materializes private copies for recipients.
+The outbox is activation-scoped and cleared after delivery. Missing, unsafe, malformed, or oversized attachment entries are privately logged and skipped so an attachment mistake cannot discard a successful answer.
 
 ## Credentials and networking
 

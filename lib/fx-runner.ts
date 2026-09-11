@@ -113,6 +113,15 @@ def save(name, value):
     temporary.replace(JOB / name)
 
 
+def artifact_warning(reason):
+    # Attachment mistakes must not replace an otherwise successful answer.
+    try:
+        with (JOB / "artifact-warnings.log").open("a", encoding="utf-8") as log:
+            log.write(reason + "\n")
+    except OSError:
+        pass
+
+
 def cancel(signum, frame):
     if child is not None and child.poll() is None:
         os.killpg(child.pid, signal.SIGTERM)
@@ -124,22 +133,46 @@ def artifacts():
     manifest = WORKSPACE / ".console/artifacts.json"
     if not manifest.exists():
         return []
-    paths = json.loads(manifest.read_text(encoding="utf-8"))
-    if not isinstance(paths, list) or len(paths) > 4:
-        raise ValueError("Artifact manifest must list at most four paths")
+    try:
+        paths = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        artifact_warning("ignored unreadable artifact manifest")
+        return []
+    if not isinstance(paths, list):
+        artifact_warning("ignored non-list artifact manifest")
+        return []
+    if len(paths) > 4:
+        artifact_warning("ignored artifact entries after the first four")
+        paths = paths[:4]
     result = []
     total = 0
-    for value in paths:
+    for index, value in enumerate(paths):
         if not isinstance(value, str):
-            raise ValueError("Artifact paths must be strings")
-        path = (WORKSPACE / value).resolve()
-        relative = path.relative_to(WORKSPACE).as_posix()
-        if not relative.startswith(".console/outbox/") or not path.is_file():
-            raise ValueError("Artifacts must be files under .console/outbox/")
-        total += path.stat().st_size
-        if total > 3 * 1024 * 1024:
-            raise ValueError("Artifacts exceed 3 MB")
-        result.append({"path": relative, "content_base64": base64.b64encode(path.read_bytes()).decode("ascii")})
+            artifact_warning("ignored non-string artifact entry " + str(index + 1))
+            continue
+        try:
+            path = (WORKSPACE / value).resolve()
+            relative = path.relative_to(WORKSPACE).as_posix()
+            if not relative.startswith(".console/outbox/") or not path.is_file():
+                raise ValueError
+            size = path.stat().st_size
+        except (OSError, ValueError):
+            artifact_warning("ignored missing or unsafe artifact entry " + str(index + 1))
+            continue
+        if total + size > 3 * 1024 * 1024:
+            artifact_warning("ignored artifact entry exceeding the 3 MB total limit")
+            continue
+        try:
+            content = path.read_bytes()
+        except OSError:
+            artifact_warning("ignored unreadable artifact entry " + str(index + 1))
+            continue
+        if total + len(content) > 3 * 1024 * 1024:
+            artifact_warning("ignored artifact entry exceeding the 3 MB total limit")
+            continue
+
+        total += len(content)
+        result.append({"path": relative, "content_base64": base64.b64encode(content).decode("ascii")})
     return result
 
 

@@ -31,6 +31,7 @@ Return your final answer normally. The Console launcher waits for the top-level 
 Native FX subagents must return findings to their parent. They must not complete the Console request or send a final answer directly to the user. The parent must collect their results before returning its own final answer.
 
 When you create files the recipient should see, copy them under \`.console/outbox/\`. Before returning, the top-level agent writes \`.console/artifacts.json\` containing a JSON array of selected relative paths, for example \`[".console/outbox/report.md"]\`. Only these selected files are attached. List at most four files totaling at most 3 MB and never attach secrets. For office documents, also provide a PDF preview.
+The outbox is cleared after every activation. On a follow-up, select only files that exist in the current activation; recreate a prior file before attaching it again.
 
 Progress is optional. For genuinely long work, use \`a2a progress --message "..."\` for sparse, useful milestones. Progress does not finish the task. Do not send routine narration or use progress as a heartbeat.
 
