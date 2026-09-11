@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fxRunnerSource } from "../lib/fx-runner.ts";
 
-for (const scenario of ["success", "crash", "callback-failure", "unsafe-artifact", "empty-final"] as const) {
+for (const scenario of ["success", "crash", "callback-failure", "unsafe-artifact", "missing-artifact", "empty-final"] as const) {
   test(`launcher handles ${scenario} after waiting for FX`, (t) => {
     const root = mkdtempSync(join(tmpdir(), "console-runner-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -31,8 +31,8 @@ if os.environ['SCENARIO'] == 'crash':
     sys.exit(42)
 pathlib.Path('.console/outbox').mkdir()
 pathlib.Path('.console/outbox/report.md').write_text('Parent report')
-artifact = '../outside.md' if os.environ['SCENARIO'] == 'unsafe-artifact' else '.console/outbox/report.md'
-pathlib.Path('.console/artifacts.json').write_text(json.dumps([artifact]))
+artifacts = ['../outside.md'] if os.environ['SCENARIO'] == 'unsafe-artifact' else ['.console/outbox/missing.md', '.console/outbox/report.md'] if os.environ['SCENARIO'] == 'missing-artifact' else ['.console/outbox/report.md']
+pathlib.Path('.console/artifacts.json').write_text(json.dumps(artifacts))
 print(json.dumps({'output': 'truncated preview', 'final_output': '' if os.environ['SCENARIO'] == 'empty-final' else 'Parent is done', 'session_id': 'parent-session', 'exit_code': 0}))
 `, { mode: 0o755 });
     const result = spawnSync("python3", ["-c", `
@@ -61,16 +61,23 @@ runpy.run_path(sys.argv[1], run_name='__main__')
         CONSOLE_A2A_URL: "https://console.example/api/a2a", CONSOLE_A2A_TOKEN: "messaging-token",
         CONSOLE_LIFECYCLE_TOKEN: "lifecycle-token", CONSOLE_MODEL_GATEWAY_URL: "https://console.example/api/model-gateway", AI_GATEWAY_API_KEY: "must-not-leak", FX_RESUME_ID: "" },
     });
-    assert.equal(result.status, scenario === "success" ? 0 : 1, result.stderr);
+    assert.equal(result.status, ["success", "unsafe-artifact", "missing-artifact"].includes(scenario) ? 0 : 1, result.stderr);
     const gatewayLog = readFileSync(join(job, "gateway-events.jsonl"), "utf8");
     assert.match(gatewayLog, /"status": 200/);
     assert.doesNotMatch(gatewayLog, /messaging-token|must-not-leak|lifecycle-token/);
     const payload = JSON.parse(readFileSync(join(job, "delivery.json"), "utf8"));
-    if (scenario === "success" || scenario === "callback-failure") {
+    if (["success", "callback-failure", "unsafe-artifact", "missing-artifact"].includes(scenario)) {
       assert.equal(payload.operation, "complete");
       assert.equal(payload.arguments.session_id, "parent-session");
       assert.equal(payload.arguments.content, "Parent is done");
-      assert.equal(Buffer.from(payload.arguments.artifacts[0].content_base64, "base64").toString(), "Parent report");
+      if (["success", "callback-failure", "missing-artifact"].includes(scenario)) {
+        assert.equal(Buffer.from(payload.arguments.artifacts[0].content_base64, "base64").toString(), "Parent report");
+      } else {
+        assert.deepEqual(payload.arguments.artifacts, []);
+      }
+      if (scenario === "unsafe-artifact" || scenario === "missing-artifact") {
+        assert.match(readFileSync(join(job, "artifact-warnings.log"), "utf8"), /ignored missing or unsafe artifact entry/);
+      }
     } else {
       assert.equal(payload.operation, "fail");
       assert.doesNotMatch(payload.arguments.content, /simulated startup failure/);
